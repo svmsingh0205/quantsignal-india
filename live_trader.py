@@ -258,29 +258,15 @@ def get_universe(sector_filter: list, stock_filter: list, penny_only: bool) -> l
     return syms
 
 def _quick_search(symbol: str) -> dict | None:
-    """Fetch a quick snapshot for any NSE symbol."""
-    try:
-        yf_sym = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
-        df = DataService.fetch_ohlcv(yf_sym, period="5d", interval="1d")
-        if df.empty:
-            # Try BSE suffix
-            df = DataService.fetch_ohlcv(f"{symbol}.BO", period="5d", interval="1d")
-            if df.empty:
-                return None
-        price = float(df["Close"].iloc[-1])
-        prev  = float(df["Close"].iloc[-2]) if len(df) >= 2 else price
-        chg   = round((price / prev - 1) * 100, 2)
-        high  = float(df["High"].max())
-        low   = float(df["Low"].min())
-        vol   = int(df["Volume"].iloc[-1])
-        sector = SYMBOL_TO_SECTOR.get(symbol, "Other")
-        return {
-            "symbol": symbol, "price": price, "chg": chg,
-            "high_5d": high, "low_5d": low, "volume": vol,
-            "sector": sector, "df": df,
-        }
-    except Exception:
-        return None
+    """Fetch a real-time price snapshot for any NSE/BSE symbol."""
+    # Try NSE first, then BSE
+    for suffix in (".NS", ".BO"):
+        yf_sym = symbol if symbol.endswith((".NS", ".BO")) else f"{symbol}{suffix}"
+        data = DataService.fetch_live_price(yf_sym)
+        if data:
+            data["sector"] = SYMBOL_TO_SECTOR.get(symbol, "Other")
+            return data
+    return None
 
 def _chart_layout(title="", height=450):
     return dict(
@@ -500,24 +486,26 @@ if (_search_btn or st.session_state.get("_prev_search") != _search_sym) and _sea
                 <div style='display:flex;align-items:center;gap:8px;margin-bottom:6px;'>
                     <span style='font-size:1.3rem;font-weight:900;color:#f1f5f9;'>{_snap["symbol"]}</span>
                     <span class="badge-sector">{_sec}</span>
+                    <span style='color:#334155;font-size:0.65rem;'>Live · refreshes every 60s</span>
                 </div>
                 <div style='font-size:2rem;font-weight:900;color:#f1f5f9;line-height:1;'>
                     ₹{_snap["price"]:,.2f}
                     <span style='font-size:1rem;color:{_chg_color};margin-left:8px;'>{_arrow} {_snap["chg"]:+.2f}%</span>
                 </div>
                 <div style='margin-top:8px;font-size:0.72rem;color:#475569;'>
-                    5D High: <b style='color:#10b981;'>₹{_snap["high_5d"]:,.2f}</b> &nbsp;|&nbsp;
-                    5D Low: <b style='color:#ef4444;'>₹{_snap["low_5d"]:,.2f}</b> &nbsp;|&nbsp;
+                    Today H: <b style='color:#10b981;'>₹{_snap["today_high"]:,.2f}</b> &nbsp;|&nbsp;
+                    Today L: <b style='color:#ef4444;'>₹{_snap["today_low"]:,.2f}</b> &nbsp;|&nbsp;
+                    Prev Close: <b style='color:#94a3b8;'>₹{_snap["prev_close"]:,.2f}</b> &nbsp;|&nbsp;
                     Vol: <b style='color:#94a3b8;'>{_snap["volume"]:,}</b>
                 </div>
                 <div style='margin-top:6px;'>
                     {''.join(f'<span class="factor-pos">✅ {f}</span>' for f in _factors["positive"][:2])}
                 </div>
             </div>""", unsafe_allow_html=True)
-        _sc2.metric("Price", f"₹{_snap['price']:,.2f}")
-        _sc3.metric("1D Change", f"{_snap['chg']:+.2f}%")
-        _sc4.metric("5D High", f"₹{_snap['high_5d']:,.2f}")
-        _sc5.metric("5D Low", f"₹{_snap['low_5d']:,.2f}")
+        _sc2.metric("LTP", f"₹{_snap['price']:,.2f}", f"{_snap['chg']:+.2f}%")
+        _sc3.metric("Prev Close", f"₹{_snap['prev_close']:,.2f}")
+        _sc4.metric("Today High", f"₹{_snap['today_high']:,.2f}")
+        _sc5.metric("Today Low", f"₹{_snap['today_low']:,.2f}")
         _sc6.metric("Volume", f"{_snap['volume']//1000}K")
 
         # Mini sparkline chart
