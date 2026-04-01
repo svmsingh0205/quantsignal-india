@@ -880,27 +880,30 @@ with tab3:
         def _predict_one(sym):
             try:
                 df = DataService.fetch_ohlcv(sym, period="1y")
-                if df.empty or len(df) < 60:   # lowered from 100 — more stocks qualify
+                if df.empty or len(df) < 60:
                     return None
                 pred = PredictionEngine.predict_next_day(df)
-                if "error" in pred:
+                if not pred or "error" in pred:
                     return None
                 clean = sym.replace(".NS", "")
                 sector = SYMBOL_TO_SECTOR.get(clean, "Other")
+                price = pred["current_price"]
+                if price <= 0:
+                    return None
                 report = StockMetadata.generate_report(
-                    symbol=clean, price=pred["current_price"], sector=sector,
+                    symbol=clean, price=price, sector=sector,
                     confidence=pred["confidence"], direction=pred["direction"],
                     predicted_return=pred["predicted_return"],
                     volatility=pred.get("volatility", 20) / 100,
                     rsi=pred.get("rsi", 50),
-                    entry=pred["current_price"],
+                    entry=price,
                     target=pred["predicted_price"],
-                    stop_loss=pred["current_price"] * 0.97,
+                    stop_loss=price * 0.97,
                     mode="swing",
                 )
                 return {
                     "symbol": clean, "sector": sector,
-                    "price": pred["current_price"],
+                    "price": price,
                     "predicted": pred["predicted_price"],
                     "return_pct": pred["predicted_return"],
                     "direction": pred["direction"],
@@ -910,10 +913,10 @@ with tab3:
                     "conditions": pred.get("market_conditions", []),
                     "risk_level": report["risk_level"],
                     "signal": report["signal"],
-                    "is_penny": pred["current_price"] <= PENNY_MAX_PRICE,
+                    "is_penny": price <= PENNY_MAX_PRICE,
                     "factors": StockMetadata.get_global_factors(sector),
                 }
-            except Exception:
+            except Exception as _e:
                 return None
 
         done2 = 0
@@ -937,28 +940,42 @@ with tab3:
         st.session_state["nd_results"] = nd_results
         st.session_state["nd_all_preds"] = all_preds
 
-    if "nd_results" in st.session_state:
-        nd_results = st.session_state["nd_results"]
-        all_preds_debug = st.session_state.get("nd_all_preds", [])
+    if "nd_all_preds" in st.session_state:
+        all_preds_debug = st.session_state["nd_all_preds"]
+
+        # Re-filter live every time slider changes — no stale results
+        nd_results = [
+            r for r in all_preds_debug
+            if r["direction"] == "UP" and r["confidence"] >= nd_min_conf
+        ]
+        nd_results.sort(key=lambda x: (x["confidence"], x["return_pct"]), reverse=True)
+        st.session_state["nd_results"] = nd_results
+
+        up_ct   = sum(1 for r in all_preds_debug if r["direction"] == "UP")
+        down_ct = sum(1 for r in all_preds_debug if r["direction"] == "DOWN")
+        neut_ct = sum(1 for r in all_preds_debug if r["direction"] == "NEUTRAL")
+        total_processed = len(all_preds_debug)
+
+        # Always show scan summary
+        sa, sb, sc, sd = st.columns(4)
+        sa.metric("Scanned", total_processed)
+        sb.metric("UP", up_ct, delta="bullish")
+        sc.metric("DOWN", down_ct)
+        sd.metric("NEUTRAL", neut_ct)
+        st.markdown("---")
 
         if not nd_results:
-            # Show helpful breakdown instead of a blank message
-            up_ct   = sum(1 for r in all_preds_debug if r["direction"] == "UP")
-            down_ct = sum(1 for r in all_preds_debug if r["direction"] == "DOWN")
-            neut_ct = sum(1 for r in all_preds_debug if r["direction"] == "NEUTRAL")
-            total_processed = len(all_preds_debug)
-
             st.warning(
-                f"No UP predictions above **{nd_min_conf:.0%}** confidence found. "
-                f"Processed **{total_processed}** stocks — "
-                f"UP: {up_ct} · DOWN: {down_ct} · NEUTRAL: {neut_ct}. "
-                f"Try lowering Min Confidence below **{nd_min_conf:.0%}**."
+                f"No UP predictions above **{nd_min_conf:.0%}** confidence. "
+                f"Found **{up_ct}** UP signals total — lower the slider to see them."
             )
-            # Show the best UP picks regardless of threshold so user isn't left empty-handed
-            best_ups = sorted([r for r in all_preds_debug if r["direction"] == "UP"],
-                              key=lambda x: x["confidence"], reverse=True)[:10]
+            # Always show best UP picks regardless of threshold
+            best_ups = sorted(
+                [r for r in all_preds_debug if r["direction"] == "UP"],
+                key=lambda x: x["confidence"], reverse=True
+            )[:10]
             if best_ups:
-                st.markdown(f"#### Best UP signals found (below your threshold):")
+                st.markdown("#### Best UP signals (below your threshold):")
                 _cols = st.columns(min(5, len(best_ups)))
                 for _col, r in zip(_cols, best_ups[:5]):
                     ret_color = "#10b981" if r["return_pct"] > 0 else "#ef4444"
@@ -967,9 +984,12 @@ with tab3:
                         <div class="stat-card" style="text-align:center;">
                             <div style="font-size:0.65rem;color:#334155;">{r["sector"]}</div>
                             <div style="font-size:1rem;font-weight:900;color:#f1f5f9;">{r["symbol"]}</div>
-                            <div style="font-size:1.1rem;color:{ret_color};">{r["return_pct"]:+.2f}%</div>
-                            <div style="font-size:0.75rem;color:#475569;">Conf: {r["confidence"]:.0%}</div>
+                            <div style="font-size:1.2rem;color:{ret_color};font-weight:800;">{r["return_pct"]:+.2f}%</div>
+                            <div style="font-size:0.75rem;color:#3b82f6;">Conf: {r["confidence"]:.0%}</div>
+                            <div style="font-size:0.68rem;color:#475569;">₹{r["price"]:,.2f}</div>
                         </div>""", unsafe_allow_html=True)
+            elif total_processed == 0:
+                st.error("No stocks were processed. This usually means yfinance rate-limiting or a network issue. Try again in 30 seconds.")
         else:
             nm1, nm2, nm3, nm4 = st.columns(4)
             nm1.metric("UP Predictions", len(nd_results))
