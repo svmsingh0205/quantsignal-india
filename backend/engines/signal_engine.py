@@ -8,13 +8,20 @@ from typing import Optional
 from .data_service import DataService
 from .feature_engine import FeatureEngine
 from .ml_engine import MLEngine
+from .multi_analyzer import MultiAnalyzer
 from ..config import (
     ALL_SYMBOLS, MIN_CONFIDENCE, MIN_RISK_REWARD,
-    MAX_SIGNALS, ML_WEIGHT, ENTRY_SCORE_WEIGHT, RISK_WEIGHT,
+    MAX_SIGNALS, ML_WEIGHT, ENTRY_SCORE_WEIGHT, RISK_WEIGHT, SECTOR_MAP,
 )
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Build reverse symbol → sector map
+_SYMBOL_SECTOR: dict[str, str] = {}
+for _sec, _syms in SECTOR_MAP.items():
+    for _s in _syms:
+        _SYMBOL_SECTOR[_s] = _sec
 
 
 class SignalEngine:
@@ -31,12 +38,13 @@ class SignalEngine:
         max_signals: int = MAX_SIGNALS,
         capital: float = 1_000_000,
         risk_pct: float = 0.02,
+        enabled_analyzers: Optional[list[str]] = None,
     ) -> list[dict]:
         symbols = symbols or ALL_SYMBOLS
         raw_signals = []
         for sym in symbols:
             try:
-                sig = self._evaluate_stock(sym, capital, risk_pct)
+                sig = self._evaluate_stock(sym, capital, risk_pct, enabled_analyzers)
                 if sig and sig["confidence"] >= min_confidence and sig["risk_reward"] >= min_rr:
                     raw_signals.append(sig)
             except Exception as e:
@@ -44,7 +52,13 @@ class SignalEngine:
         raw_signals.sort(key=lambda x: x["confidence"], reverse=True)
         return raw_signals[:max_signals]
 
-    def _evaluate_stock(self, symbol: str, capital: float, risk_pct: float) -> Optional[dict]:
+    def _evaluate_stock(
+        self,
+        symbol: str,
+        capital: float,
+        risk_pct: float,
+        enabled_analyzers: Optional[list[str]] = None,
+    ) -> Optional[dict]:
         df = DataService.fetch_ohlcv(symbol, period="1y")
         if df.empty or len(df) < 200:
             return None
@@ -52,14 +66,35 @@ class SignalEngine:
         ml_features = FeatureEngine.get_ml_features(df)
         if ml_features.empty or len(ml_features) < 60:
             return None
+
+        # ── ML score ──────────────────────────────────────────────────────────
         ml_result = self.ml.get_stock_prediction(ml_features, df)
         prob_up = ml_result["probability_up"]
+
+        # ── Entry timing score ────────────────────────────────────────────────
         entry_score = FeatureEngine.compute_entry_score(df)
+
+        # ── Risk score ────────────────────────────────────────────────────────
         last = features_df.iloc[-1]
         vol = last.get("Volatility", 0.25)
         risk_score = float(np.clip(1 - vol / 0.5, 0, 1))
-        confidence = ML_WEIGHT * prob_up + ENTRY_SCORE_WEIGHT * entry_score + RISK_WEIGHT * risk_score
+
+        # ── Multi-analyzer score ──────────────────────────────────────────────
+        sector = _SYMBOL_SECTOR.get(symbol, "")
+        ma = MultiAnalyzer(enabled_analyzers)
+        ma_result = ma.analyze(df, sector=sector, capital=capital, risk_pct=risk_pct)
+        ma_score = ma_result.get("combined_score", 0.5)
+
+        # ── Combined confidence (ML 35% + entry 20% + risk 15% + multi 30%) ──
+        confidence = (
+            0.35 * prob_up
+            + 0.20 * entry_score
+            + 0.15 * risk_score
+            + 0.30 * ma_score
+        )
         confidence = float(np.clip(confidence, 0, 1))
+
+        # ── Price levels ──────────────────────────────────────────────────────
         current_price = float(df["Close"].iloc[-1])
         atr = self._compute_atr(df)
         support = self._find_support(df)
@@ -74,12 +109,24 @@ class SignalEngine:
         risk = entry - stop_loss
         reward = target - entry
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
+
+        # ── Capital-based position sizing ─────────────────────────────────────
         risk_amount = capital * risk_pct
         position_size = int(risk_amount / risk) if risk > 0 else 0
         position_value = round(position_size * entry, 2)
+        potential_profit = round(position_size * reward, 2)
+        potential_loss = round(position_size * risk, 2)
+
         rsi = last.get("RSI", 50)
         momentum = last.get("Momentum", 0)
-        rationale = self._build_rationale(prob_up, entry_score, rsi, momentum, vol, risk_reward)
+
+        # ── Reasoning: merge legacy + multi-analyzer ──────────────────────────
+        legacy_rationale = self._build_rationale(prob_up, entry_score, rsi, momentum, vol, risk_reward)
+        ma_reasons = ma_result.get("reasoning", [])
+        full_rationale = legacy_rationale
+        if ma_reasons:
+            full_rationale += "; " + "; ".join(ma_reasons[:3])
+
         clean_sym = symbol.replace(".NS", "")
         return {
             "symbol": clean_sym,
@@ -91,13 +138,20 @@ class SignalEngine:
             "direction": "LONG" if prob_up > 0.5 else "SHORT",
             "position_size": position_size,
             "position_value": position_value,
+            "potential_profit": potential_profit,
+            "potential_loss": potential_loss,
+            "risk_amount": round(risk_amount, 2),
             "ml_probability": round(prob_up, 4),
             "entry_score": round(entry_score, 4),
             "risk_score": round(risk_score, 4),
+            "multi_analyzer_score": round(ma_score, 4),
+            "analyzer_breakdown": ma_result.get("analyzers", {}),
             "rsi": round(float(rsi), 2),
             "momentum": round(float(momentum), 4),
             "volatility": round(float(vol), 4),
-            "rationale": rationale,
+            "sector": sector,
+            "rationale": full_rationale,
+            "reasoning": ma_reasons,
         }
 
     @staticmethod
