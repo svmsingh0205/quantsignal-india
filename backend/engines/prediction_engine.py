@@ -103,19 +103,12 @@ class PredictionEngine:
         current_price = float(df["Close"].iloc[-1])
         predicted_price = current_price * (1 + ensemble_return)
 
-        # Confidence: based on agreement between models
-        pred_vals = list(preds.values())
-        agreement = 1 - (np.std(pred_vals) / (abs(np.mean(pred_vals)) + 1e-6))
-        confidence = float(np.clip(agreement * 0.5 + 0.5, 0.3, 0.95))
-
-        # Direction — lowered threshold so small positive moves register as UP
+        # Direction
         direction = "UP" if ensemble_return > 0.001 else ("DOWN" if ensemble_return < -0.001 else "NEUTRAL")
 
-        # Confidence: blend model agreement with absolute predicted return magnitude
+        # Confidence: blend model agreement + direction consensus bonus
         pred_vals = list(preds.values())
-        agreement = 1 - (np.std(pred_vals) / (abs(np.mean(pred_vals)) + 1e-6))
-        agreement = float(np.clip(agreement, 0, 1))
-        # Boost confidence when all models agree on direction
+        agreement = float(np.clip(1 - (np.std(pred_vals) / (abs(np.mean(pred_vals)) + 1e-6)), 0, 1))
         direction_votes = sum(1 for v in pred_vals if v > 0)
         direction_bonus = 0.10 if direction_votes == 3 else (0.05 if direction_votes >= 2 else 0.0)
         confidence = float(np.clip(agreement * 0.55 + 0.35 + direction_bonus, 0.30, 0.95))

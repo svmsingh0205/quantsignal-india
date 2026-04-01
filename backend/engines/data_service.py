@@ -19,7 +19,7 @@ class DataService:
     """Handles all market data fetching and preprocessing."""
 
     _cache: dict[str, tuple[datetime, pd.DataFrame]] = {}
-    CACHE_TTL = timedelta(minutes=15)
+    CACHE_TTL = timedelta(minutes=5)   # 5 min for intraday freshness
     # Live price cache is much shorter — 60 seconds
     _price_cache: dict[str, tuple[datetime, float]] = {}
     PRICE_TTL = timedelta(seconds=60)
@@ -69,16 +69,23 @@ class DataService:
             ticker = yf.Ticker(symbol)
             fi = ticker.fast_info
 
-            price = float(fi.get("last_price") or fi.get("lastPrice") or 0)
-            prev  = float(fi.get("previous_close") or fi.get("previousClose") or 0)
+            # yfinance fast_info uses attribute access, not dict keys
+            try:
+                price = float(getattr(fi, "last_price", None) or 0)
+                prev  = float(getattr(fi, "previous_close", None) or 0)
+            except (TypeError, ValueError):
+                price, prev = 0, 0
 
             # fast_info failed — fall back to 1m bar
             if price == 0:
                 df1m = ticker.history(period="1d", interval="1m")
                 if df1m.empty:
                     return None
+                df1m = cls._clean(df1m)
+                if df1m.empty:
+                    return None
                 price = float(df1m["Close"].iloc[-1])
-                prev  = float(df1m["Close"].iloc[0])
+                prev  = float(df1m["Close"].iloc[0]) if len(df1m) > 1 else price
 
             chg_pct = round((price / prev - 1) * 100, 2) if prev > 0 else 0.0
 
@@ -86,8 +93,8 @@ class DataService:
             df5d = cls.fetch_ohlcv(symbol, period="5d", interval="1d")
             high_52 = float(df5d["High"].max()) if not df5d.empty else price
             low_52  = float(df5d["Low"].min())  if not df5d.empty else price
-            vol     = int(fi.get("three_month_average_volume") or
-                          (df5d["Volume"].iloc[-1] if not df5d.empty else 0))
+            vol     = int(getattr(fi, "three_month_average_volume", None) or
+                          (int(df5d["Volume"].iloc[-1]) if not df5d.empty else 0))
 
             # Today's intraday high/low from 1m bars
             try:

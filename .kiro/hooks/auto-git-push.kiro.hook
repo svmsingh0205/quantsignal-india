@@ -13,9 +13,8 @@
     ]
   },
   "then": {
-    "type": "runCommand",
-    "command": "cd \"C:\\Users\\Lenovo\\fi\" && \"C:\\Program Files\\Git\\cmd\\git.exe\" add . && \"C:\\Program Files\\Git\\cmd\\git.exe\" commit -m \"Auto-sync: updated project files\" --allow-empty && \"C:\\Program Files\\Git\\cmd\\git.exe\" push origin main",
-    "timeout": 0
+    "type": "askAgent",
+    "prompt": "give link after every step\n"
   },
   "workspaceFolderName": "fi",
   "shortName": "auto-git-push"
