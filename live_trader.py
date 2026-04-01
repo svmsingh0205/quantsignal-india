@@ -174,6 +174,54 @@ for _sec, _syms in SECTOR_GROUPS.items():
 
 ALL_SYMBOLS_CLEAN = sorted(set(s.replace(".NS", "") for s in INTRADAY_STOCKS))
 
+# ── EXTENDED NSE/BSE SEARCH LIST (all liquid symbols) ─────────────────────────
+# Combines the intraday universe + common NSE symbols not in intraday list
+_EXTRA_NSE = [
+    "NIFTY50","SENSEX","BANKNIFTY","FINNIFTY",
+    "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","SBIN","BHARTIARTL",
+    "KOTAKBANK","LT","ITC","AXISBANK","BAJFINANCE","ASIANPAINT","MARUTI","HCLTECH",
+    "SUNPHARMA","TITAN","ULTRACEMCO","WIPRO","NESTLEIND","BAJAJFINSV","TATAMOTORS",
+    "POWERGRID","NTPC","ONGC","JSWSTEEL","M&M","TATASTEEL","ADANIENT","ADANIPORTS",
+    "COALINDIA","GRASIM","TECHM","INDUSINDBK","HINDALCO","DRREDDY","DIVISLAB",
+    "CIPLA","BPCL","EICHERMOT","BRITANNIA","APOLLOHOSP","TATACONSUM","HEROMOTOCO",
+    "SBILIFE","HDFCLIFE","BAJAJ-AUTO","UPL","SHRIRAMFIN","ADANIGREEN","AMBUJACEM",
+    "AUROPHARMA","BANKBARODA","BERGEPAINT","BOSCHLTD","CANBK","CHOLAFIN","COLPAL",
+    "DABUR","DLF","GAIL","GODREJCP","HAVELLS","ICICIPRULI","INDHOTEL","INDUSTOWER",
+    "IOC","IRCTC","JINDALSTEL","LICI","LODHA","LUPIN","MARICO","MCDOWELL-N",
+    "MUTHOOTFIN","NAUKRI","NHPC","NMDC","OBEROIRLTY","OFSS","PAGEIND","PIDILITIND",
+    "PIIND","PNB","RECLTD","SAIL","SIEMENS","SRF","TATAPOWER","TORNTPHARM","TRENT",
+    "UNIONBANK","VBL","VEDL","ZOMATO","ZYDUSLIFE","PFC","HAL","BEL","BDL","GRSE",
+    "MAZDOCK","MTAR","BEML","COCHINSHIP","RVNL","IRFC","IRCON","KECL","NBCC",
+    "SJVN","SUZLON","INOXWIND","YESBANK","IDEA","RPOWER","JPPOWER","UCOBANK",
+    "INDIANB","BANKINDIA","CENTRALBK","MAHABANK","PSB","JKBANK","PERSISTENT",
+    "COFORGE","KPITTECH","TATAELXSI","LTIM","MPHASIS","ZENSARTECH","MASTEK",
+    "POLICYBZR","PAYTM","JIOFIN","ANGELONE","LAURUSLABS","GRANULES","NATCOPHARM",
+    "IPCALAB","GLENMARK","ALKEM","FORTIS","MAXHEALTH","METROPOLIS","DEEPAKNTR",
+    "NAVINFLUOR","FLUOROCHEM","CLEAN","FINEORG","TATACHEM","GNFC","COROMANDEL",
+    "PRESTIGE","BRIGADE","SOBHA","PHOENIXLTD","SHREECEM","JKCEMENT","RAMCOCEM",
+    "TATACOMM","HFCL","STLTECH","RAILTEL","ROUTE","TANLA","OLECTRA","ASHOKLEY",
+    "TVSMOTOR","BALKRISIND","APOLLOTYRE","MOTHERSON","BHARATFORG","EXIDEIND",
+    "AMARARAJA","EMAMILTD","JYOTHYLAB","RADICO","BIKAJI","DEVYANI","WESTLIFE",
+    "JUBLFOOD","MANAPPURAM","LICHSGFIN","PNBHOUSING","CANFINHOME","CREDITACC",
+    "UJJIVANSFB","EQUITASBNK","SBICARD","HDFCAMC","NIPPONLIFE","AAVAS","HOMEFIRST",
+    "NATIONALUM","HINDCOPPER","MOIL","WELCORP","APLAPOLLO","JINDALSAW","JSWINFRA",
+    "RATNAMANI","CONCOR","TIINDIA","GPPL","ADANIGAS","IGL","MGL","GUJGASLTD",
+    "MRPL","PETRONET","OIL","TORNTPOWER","JSWENERGY","CESC","TRIL","GMRINFRA",
+    "IRB","ASHOKA","KNRCON","PSPPROJECT","CAPACITE","SADBHAV","HGINFRA","PNCINFRA",
+    "NCC","KALPATPOWR","DATAPATTNS","MIDHANI","PARAS","DPSL","ZENTEC","ASTRA",
+    "IDEAFORGE","SOLARA","ATUL","VINATI","GALAXYSURF","ROSSARI","ANUPAM","NOCIL",
+    "NEOGEN","PCBL","IGPL","BASF","AKZOINDIA","KANSAINER","BERGER","PIDILITIND",
+    "GODREJPROP","MAHLIFE","KOLTEPATIL","SUNTECK","NUVOCO","DALMIA","JKLAKSHMI",
+    "BIRLACORPN","HEIDELBERG","PRISM","ORIENT","NAUKRI","INFOEDGE","JUSTDIAL",
+    "INDIAMART","CARTRADE","EASEMYTRIP","NYKAA","SWIGGY","ONMOBILE","GTLINFRA",
+    "LALPATHLAB","KRSNAA","VIJAYA","THYROCARE","BIOCON","STRIDES","SEQUENT","DIVI",
+    "ABBOTINDIA","PFIZER","SANOFI","GLAXO","ERIS","JBCHEPHARM","AJANTPHARM",
+    "SUVEN","IPCALAB","TORNTPHARM","ZYDUSLIFE","ALKEM","NATCOPHARM","GRANULES",
+    "LAURUSLABS","GLENMARK","AUROPHARMA","LUPIN","CIPLA","DRREDDY","SUNPHARMA",
+    "DIVISLAB","APOLLOHOSP","FORTIS","MAXHEALTH","METROPOLIS","THYROCARE",
+]
+_ALL_SEARCH_SYMBOLS = sorted(set(ALL_SYMBOLS_CLEAN + [s for s in _EXTRA_NSE if s not in ALL_SYMBOLS_CLEAN]))
+
 def market_open() -> bool:
     now = _now_ist()
     if now.weekday() >= 5:
@@ -208,6 +256,31 @@ def get_universe(sector_filter: list, stock_filter: list, penny_only: bool) -> l
         ])]
         return penny_known if penny_known else syms
     return syms
+
+def _quick_search(symbol: str) -> dict | None:
+    """Fetch a quick snapshot for any NSE symbol."""
+    try:
+        yf_sym = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+        df = DataService.fetch_ohlcv(yf_sym, period="5d", interval="1d")
+        if df.empty:
+            # Try BSE suffix
+            df = DataService.fetch_ohlcv(f"{symbol}.BO", period="5d", interval="1d")
+            if df.empty:
+                return None
+        price = float(df["Close"].iloc[-1])
+        prev  = float(df["Close"].iloc[-2]) if len(df) >= 2 else price
+        chg   = round((price / prev - 1) * 100, 2)
+        high  = float(df["High"].max())
+        low   = float(df["Low"].min())
+        vol   = int(df["Volume"].iloc[-1])
+        sector = SYMBOL_TO_SECTOR.get(symbol, "Other")
+        return {
+            "symbol": symbol, "price": price, "chg": chg,
+            "high_5d": high, "low_5d": low, "volume": vol,
+            "sector": sector, "df": df,
+        }
+    except Exception:
+        return None
 
 def _chart_layout(title="", height=450):
     return dict(
@@ -365,7 +438,8 @@ with st.sidebar:
 # ── TOP HEADER ────────────────────────────────────────────────────────────────
 universe = get_universe(sector_filter, stock_filter, penny_only)
 
-hcol1, hcol2, hcol3, hcol4 = st.columns([3.5, 1, 1, 1])
+# ── GLOBAL STOCK SEARCH BAR ───────────────────────────────────────────────────
+hcol1, hcol_search, hcol2, hcol3, hcol4 = st.columns([2.8, 2.2, 0.9, 0.9, 0.9])
 with hcol1:
     live_badge = ('<span style="background:#065f46;color:#6ee7b7;padding:2px 9px;border-radius:5px;font-size:0.68rem;font-weight:800;letter-spacing:0.05em;">● LIVE</span>'
                   if is_open else
@@ -377,17 +451,99 @@ with hcol1:
         {live_badge}{penny_badge}
     </div>
     <div style='color:#334155;font-size:0.8rem;'>
-        <b style='color:#2563eb;'>{len(universe)}</b> stocks scanning •
+        <b style='color:#2563eb;'>{len(universe)}</b> stocks •
         <b style='color:#2563eb;'>14 sectors</b> •
         {_now_ist().strftime("%d %b %Y %I:%M %p")} IST •
         Scan: <b style='color:#f59e0b;'>{scan_date.strftime("%d %b %Y")}</b>
     </div>""", unsafe_allow_html=True)
+
+with hcol_search:
+    st.markdown('<div style="padding-top:4px;">', unsafe_allow_html=True)
+    _search_cols = st.columns([3, 1])
+    with _search_cols[0]:
+        _search_sym = st.selectbox(
+            "🔍 Search any NSE/BSE stock",
+            options=[""] + _ALL_SEARCH_SYMBOLS,
+            index=0,
+            key="global_search_sym",
+            label_visibility="collapsed",
+            placeholder="🔍 Search NSE/BSE stock…",
+        )
+    with _search_cols[1]:
+        _search_btn = st.button("Go", key="global_search_btn", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
 with hcol2:
-    scan_btn = st.button("🔍 SCAN NOW", type="primary", use_container_width=True)
+    scan_btn = st.button("🔍 SCAN", type="primary", use_container_width=True)
 with hcol3:
-    best_btn = st.button("⚡ BEST TRADE", use_container_width=True)
+    best_btn = st.button("⚡ BEST", use_container_width=True)
 with hcol4:
-    predict_btn = st.button("🔮 PREDICT ALL", use_container_width=True)
+    predict_btn = st.button("🔮 PREDICT", use_container_width=True)
+
+# ── SEARCH RESULT CARD ────────────────────────────────────────────────────────
+if (_search_btn or st.session_state.get("_prev_search") != _search_sym) and _search_sym:
+    st.session_state["_prev_search"] = _search_sym
+    with st.spinner(f"Fetching {_search_sym}…"):
+        _snap = _quick_search(_search_sym)
+    if _snap is None:
+        st.error(f"❌ Could not find data for **{_search_sym}**. Check the symbol and try again.")
+    else:
+        _chg_color = "#10b981" if _snap["chg"] >= 0 else "#ef4444"
+        _arrow = "▲" if _snap["chg"] >= 0 else "▼"
+        _sec = _snap["sector"]
+        _factors = StockMetadata.get_global_factors(_sec)
+        _sc1, _sc2, _sc3, _sc4, _sc5, _sc6 = st.columns([2, 1, 1, 1, 1, 1])
+        with _sc1:
+            st.markdown(f"""
+            <div style='background:linear-gradient(135deg,#0a1628,#080f1e);border:1px solid #0f2a4a;
+                        border-radius:14px;padding:16px 20px;'>
+                <div style='display:flex;align-items:center;gap:8px;margin-bottom:6px;'>
+                    <span style='font-size:1.3rem;font-weight:900;color:#f1f5f9;'>{_snap["symbol"]}</span>
+                    <span class="badge-sector">{_sec}</span>
+                </div>
+                <div style='font-size:2rem;font-weight:900;color:#f1f5f9;line-height:1;'>
+                    ₹{_snap["price"]:,.2f}
+                    <span style='font-size:1rem;color:{_chg_color};margin-left:8px;'>{_arrow} {_snap["chg"]:+.2f}%</span>
+                </div>
+                <div style='margin-top:8px;font-size:0.72rem;color:#475569;'>
+                    5D High: <b style='color:#10b981;'>₹{_snap["high_5d"]:,.2f}</b> &nbsp;|&nbsp;
+                    5D Low: <b style='color:#ef4444;'>₹{_snap["low_5d"]:,.2f}</b> &nbsp;|&nbsp;
+                    Vol: <b style='color:#94a3b8;'>{_snap["volume"]:,}</b>
+                </div>
+                <div style='margin-top:6px;'>
+                    {''.join(f'<span class="factor-pos">✅ {f}</span>' for f in _factors["positive"][:2])}
+                </div>
+            </div>""", unsafe_allow_html=True)
+        _sc2.metric("Price", f"₹{_snap['price']:,.2f}")
+        _sc3.metric("1D Change", f"{_snap['chg']:+.2f}%")
+        _sc4.metric("5D High", f"₹{_snap['high_5d']:,.2f}")
+        _sc5.metric("5D Low", f"₹{_snap['low_5d']:,.2f}")
+        _sc6.metric("Volume", f"{_snap['volume']//1000}K")
+
+        # Mini sparkline chart
+        if not _snap["df"].empty:
+            _fig_mini = go.Figure(go.Scatter(
+                x=_snap["df"].index, y=_snap["df"]["Close"], mode="lines",
+                line=dict(color=_chg_color, width=2),
+                fill="tozeroy", fillcolor=f"rgba({'16,185,129' if _snap['chg']>=0 else '239,68,68'},0.06)",
+            ))
+            _fig_mini.update_layout(
+                **_chart_layout(height=120),
+                showlegend=False,
+                xaxis=dict(showticklabels=False, showgrid=False),
+                yaxis=dict(showticklabels=True, showgrid=False),
+                margin=dict(t=4, b=4, l=40, r=10),
+            )
+            st.plotly_chart(_fig_mini, use_container_width=True)
+
+        # Deep dive link
+        st.markdown(
+            f'<div style="text-align:right;margin-top:-8px;">'
+            f'<span style="color:#334155;font-size:0.72rem;">→ For full analysis open the </span>'
+            f'<b style="color:#3b82f6;">🔍 Deep Dive</b> tab and select <b style="color:#f59e0b;">{_snap["symbol"]}</b>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
 st.markdown("---")
 
