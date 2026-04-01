@@ -158,3 +158,123 @@ hr { border-color: #0f2040 !important; margin: 0.8rem 0 !important; }
 ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 3px; }
 </style>
 """, unsafe_allow_html=True)
+
+# ── HELPERS ───────────────────────────────────────────────────────────────────
+SYMBOL_TO_SECTOR: dict[str, str] = {}
+for _sec, _syms in SECTOR_GROUPS.items():
+    for _s in _syms:
+        SYMBOL_TO_SECTOR[_s.replace(".NS", "")] = _sec
+
+ALL_SYMBOLS_CLEAN = sorted(set(s.replace(".NS", "") for s in INTRADAY_STOCKS))
+
+def market_open() -> bool:
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    return dtime(9, 15) <= now.time() <= dtime(15, 30)
+
+def time_to_close() -> str:
+    now = datetime.now()
+    close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now >= close:
+        return "Closed"
+    diff = close - now
+    h, m = divmod(diff.seconds // 60, 60)
+    return f"{h}h {m}m left" if h else f"{m}m left"
+
+def get_universe(sector_filter: list, stock_filter: list, penny_only: bool) -> list[str]:
+    if stock_filter:
+        return [f"{s}.NS" for s in stock_filter]
+    if sector_filter:
+        out = []
+        for s in sector_filter:
+            out.extend(SECTOR_GROUPS.get(s, []))
+        syms = list(dict.fromkeys(out))
+    else:
+        syms = INTRADAY_STOCKS[:]
+    if penny_only:
+        # We'll filter by price during scan, but pre-filter known penny stocks
+        penny_known = [s for s in syms if any(p in s for p in [
+            "YESBANK","IDEA","SUZLON","RPOWER","JPPOWER","UCOBANK",
+            "MAHABANK","PSB","CENTRALBK","BANKINDIA","NHPC","SJVN",
+            "IRFC","RECLTD","PFC","NBCC","BHEL","NATIONALUM","HINDCOPPER",
+        ])]
+        return penny_known if penny_known else syms
+    return syms
+
+def _chart_layout(title="", height=450):
+    return dict(
+        template="plotly_dark", paper_bgcolor="#04080f", plot_bgcolor="#080f1e",
+        height=height, margin=dict(t=30 if title else 10, b=10, l=50, r=20),
+        font=dict(family="Inter", size=11, color="#94a3b8"),
+        legend=dict(orientation="h", y=1.02, font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(gridcolor="#0a1628", showgrid=True, zeroline=False),
+        yaxis=dict(gridcolor="#0a1628", showgrid=True, zeroline=False),
+        title=dict(text=title, font=dict(size=13, color="#e2e8f0")) if title else None,
+    )
+
+# ── PARALLEL SCAN ─────────────────────────────────────────────────────────────
+def _scan_one(args):
+    sym, capital, max_price, min_conf, penny_only = args
+    try:
+        engine = IntradayEngine(capital=capital)
+        df = engine.fetch_intraday(sym, period="5d", interval="5m")
+        if df.empty or len(df) < 30:
+            return None
+        price = float(df["Close"].iloc[-1])
+        if price > max_price:
+            return None
+        if penny_only and price > PENNY_MAX_PRICE:
+            return None
+        df = engine.add_indicators(df)
+        sc = engine.score_stock(df)
+        atr = max(sc["atr"], price * 0.005)
+        entry = round(price, 2)
+        sl = round(max(price - 1.5 * atr, price * 0.93), 2)
+        t1 = round(price + 2.0 * atr, 2)
+        t2 = round(price + 3.0 * atr, 2)
+        risk = entry - sl
+        rr = round((t1 - entry) / risk, 2) if risk > 0 else 0
+        qty = max(1, int(capital // price))
+        clean = sym.replace(".NS", "")
+        sector = SYMBOL_TO_SECTOR.get(clean, "Other")
+        report = StockMetadata.generate_report(
+            symbol=clean, price=price, sector=sector,
+            confidence=sc["score"], direction="UP" if sc["score"] >= 0.55 else "NEUTRAL",
+            predicted_return=0, volatility=0.2, rsi=sc["rsi"],
+            entry=entry, target=t1, stop_loss=sl, mode="intraday",
+        )
+        return {
+            "symbol": clean, "yf_symbol": sym, "sector": sector,
+            "price": entry, "qty": qty, "invested": round(qty * price, 2),
+            "target_1": t1, "target_2": t2, "stop_loss": sl,
+            "confidence": sc["score"], "risk_reward": rr,
+            "profit": round(qty * (t1 - entry), 2),
+            "loss": round(qty * (entry - sl), 2),
+            "rsi": sc["rsi"], "vwap": sc["vwap"],
+            "vol_ratio": sc["vol_ratio"], "supertrend": sc["supertrend"],
+            "reasons": sc["reasons"],
+            "signal": "BUY" if sc["score"] >= min_conf else "WATCH",
+            "is_penny": price <= PENNY_MAX_PRICE,
+            "risk_level": report["risk_level"],
+            "holding": report["holding_duration"],
+            "df": df,
+        }
+    except Exception:
+        return None
+
+def run_scan(universe, capital, max_price, min_conf, penny_only=False):
+    prog = st.progress(0, text="🚀 Initialising parallel scan...")
+    results, done, total = [], 0, len(universe)
+    with ThreadPoolExecutor(max_workers=15) as ex:
+        futures = {ex.submit(_scan_one, (sym, capital, max_price, min_conf, penny_only)): sym
+                   for sym in universe}
+        for fut in as_completed(futures):
+            done += 1
+            prog.progress(done / total, text=f"📡 {done}/{total} — {futures[fut].replace('.NS','')}")
+            res = fut.result()
+            if res:
+                results.append(res)
+    prog.empty()
+    results.sort(key=lambda x: (x["confidence"], x["risk_reward"]), reverse=True)
+    return results
