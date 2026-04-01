@@ -855,7 +855,7 @@ with tab3:
     with nd_c2:
         nd_stocks = st.multiselect("Specific Stocks", ALL_SYMBOLS_CLEAN, default=[], key="nd_stk")
     with nd_c3:
-        nd_min_conf = st.slider("Min Confidence", 0.50, 0.90, 0.60, 0.05, key="nd_conf")
+        nd_min_conf = st.slider("Min Confidence", 0.30, 0.90, 0.45, 0.05, key="nd_conf")
     with nd_c4:
         nd_btn = st.button("🔮 Run Predictions", type="primary", use_container_width=True)
 
@@ -868,16 +868,19 @@ with tab3:
                 nd_universe.extend(SECTOR_GROUPS.get(s, []))
             nd_universe = list(dict.fromkeys(nd_universe))
         else:
-            nd_universe = INTRADAY_STOCKS[:120]
+            # Use full universe — no arbitrary 120-stock cap
+            nd_universe = INTRADAY_STOCKS[:]
 
         prog2 = st.progress(0, text="🔮 Running ML predictions...")
         nd_results = []
+        nd_processed = 0
+        nd_skipped = 0
         total2 = len(nd_universe)
 
         def _predict_one(sym):
             try:
                 df = DataService.fetch_ohlcv(sym, period="1y")
-                if df.empty or len(df) < 100:
+                if df.empty or len(df) < 60:   # lowered from 100 — more stocks qualify
                     return None
                 pred = PredictionEngine.predict_next_day(df)
                 if "error" in pred:
@@ -914,23 +917,59 @@ with tab3:
                 return None
 
         done2 = 0
-        with ThreadPoolExecutor(max_workers=10) as ex:
+        all_preds = []   # keep ALL results for debug, filter after
+        with ThreadPoolExecutor(max_workers=12) as ex:
             futs = {ex.submit(_predict_one, sym): sym for sym in nd_universe}
             for fut in as_completed(futs):
                 done2 += 1
-                prog2.progress(done2 / total2, text=f"🔮 {done2}/{total2}")
+                prog2.progress(done2 / total2, text=f"🔮 {done2}/{total2} — scanning…")
                 res = fut.result()
-                if res and res["direction"] == "UP" and res["confidence"] >= nd_min_conf:
-                    nd_results.append(res)
+                if res:
+                    all_preds.append(res)
 
         prog2.empty()
+
+        # Show ALL UP predictions above threshold
+        nd_results = [r for r in all_preds if r["direction"] == "UP" and r["confidence"] >= nd_min_conf]
         nd_results.sort(key=lambda x: (x["confidence"], x["return_pct"]), reverse=True)
+
+        # Debug info stored so user can see what happened
         st.session_state["nd_results"] = nd_results
+        st.session_state["nd_all_preds"] = all_preds
 
     if "nd_results" in st.session_state:
         nd_results = st.session_state["nd_results"]
+        all_preds_debug = st.session_state.get("nd_all_preds", [])
+
         if not nd_results:
-            st.info("No strong UP predictions found. Try lowering confidence or changing filters.")
+            # Show helpful breakdown instead of a blank message
+            up_ct   = sum(1 for r in all_preds_debug if r["direction"] == "UP")
+            down_ct = sum(1 for r in all_preds_debug if r["direction"] == "DOWN")
+            neut_ct = sum(1 for r in all_preds_debug if r["direction"] == "NEUTRAL")
+            total_processed = len(all_preds_debug)
+
+            st.warning(
+                f"No UP predictions above **{nd_min_conf:.0%}** confidence found. "
+                f"Processed **{total_processed}** stocks — "
+                f"UP: {up_ct} · DOWN: {down_ct} · NEUTRAL: {neut_ct}. "
+                f"Try lowering Min Confidence below **{nd_min_conf:.0%}**."
+            )
+            # Show the best UP picks regardless of threshold so user isn't left empty-handed
+            best_ups = sorted([r for r in all_preds_debug if r["direction"] == "UP"],
+                              key=lambda x: x["confidence"], reverse=True)[:10]
+            if best_ups:
+                st.markdown(f"#### Best UP signals found (below your threshold):")
+                _cols = st.columns(min(5, len(best_ups)))
+                for _col, r in zip(_cols, best_ups[:5]):
+                    ret_color = "#10b981" if r["return_pct"] > 0 else "#ef4444"
+                    with _col:
+                        st.markdown(f"""
+                        <div class="stat-card" style="text-align:center;">
+                            <div style="font-size:0.65rem;color:#334155;">{r["sector"]}</div>
+                            <div style="font-size:1rem;font-weight:900;color:#f1f5f9;">{r["symbol"]}</div>
+                            <div style="font-size:1.1rem;color:{ret_color};">{r["return_pct"]:+.2f}%</div>
+                            <div style="font-size:0.75rem;color:#475569;">Conf: {r["confidence"]:.0%}</div>
+                        </div>""", unsafe_allow_html=True)
         else:
             nm1, nm2, nm3, nm4 = st.columns(4)
             nm1.metric("UP Predictions", len(nd_results))

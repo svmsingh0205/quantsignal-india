@@ -108,8 +108,17 @@ class PredictionEngine:
         agreement = 1 - (np.std(pred_vals) / (abs(np.mean(pred_vals)) + 1e-6))
         confidence = float(np.clip(agreement * 0.5 + 0.5, 0.3, 0.95))
 
-        # Direction
-        direction = "UP" if ensemble_return > 0.005 else ("DOWN" if ensemble_return < -0.005 else "NEUTRAL")
+        # Direction — lowered threshold so small positive moves register as UP
+        direction = "UP" if ensemble_return > 0.001 else ("DOWN" if ensemble_return < -0.001 else "NEUTRAL")
+
+        # Confidence: blend model agreement with absolute predicted return magnitude
+        pred_vals = list(preds.values())
+        agreement = 1 - (np.std(pred_vals) / (abs(np.mean(pred_vals)) + 1e-6))
+        agreement = float(np.clip(agreement, 0, 1))
+        # Boost confidence when all models agree on direction
+        direction_votes = sum(1 for v in pred_vals if v > 0)
+        direction_bonus = 0.10 if direction_votes == 3 else (0.05 if direction_votes >= 2 else 0.0)
+        confidence = float(np.clip(agreement * 0.55 + 0.35 + direction_bonus, 0.30, 0.95))
 
         # Price range (±1 std of historical returns over horizon)
         hist_std = float(df["Close"].pct_change(horizon).std())
