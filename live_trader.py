@@ -688,12 +688,19 @@ st.markdown("---")
 if scan_btn or best_btn:
     trades, mkt_label, mkt_bias = run_scan(universe, capital, max_price, min_conf, penny_only)
     st.session_state["trades"] = trades
-    st.session_state["buys"] = [t for t in trades if t["signal"] == "BUY"]
-    st.session_state["pennies"] = [t for t in trades if t["is_penny"]]
+    # Store ALL trades — buys re-filtered live on every rerun from current min_conf
     st.session_state["scan_time"] = _now_ist().strftime("%I:%M:%S %p IST")
     st.session_state["scan_date"] = scan_date.strftime("%d %b %Y")
     st.session_state["mkt_label"] = mkt_label
     st.session_state["mkt_bias"] = mkt_bias
+
+# ── Re-filter buys live on every rerun (slider changes take effect immediately) ─
+if "trades" in st.session_state:
+    _all_trades = st.session_state["trades"]
+    # Re-label signal based on current min_conf slider value
+    buys_live = [t for t in _all_trades if t["confidence"] >= min_conf]
+    st.session_state["buys"] = buys_live
+    st.session_state["pennies"] = [t for t in _all_trades if t["is_penny"] and t["confidence"] >= min_conf]
 
 # ── MAIN TABS ─────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
@@ -711,8 +718,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
 # TAB 1 — LIVE INTRADAY SIGNALS
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    if "buys" not in st.session_state:
-        # Welcome screen
+    if "trades" not in st.session_state:
+        # Welcome screen — no scan run yet
         st.markdown(f"""
         <div style='text-align:center;padding:40px 20px;'>
             <div style='font-size:3.5rem;margin-bottom:12px;'>⚡</div>
@@ -738,15 +745,15 @@ with tab1:
         for i, (icon, title, stocks, note) in enumerate(themes):
             tc[i%3].markdown(f'<div class="stat-card" style="text-align:left;margin-bottom:10px;"><div style="font-size:1.1rem;font-weight:800;color:#e2e8f0;">{icon} {title}</div><div style="color:#475569;font-size:0.78rem;margin-top:4px;">{stocks}</div><div style="color:#2563eb;font-size:0.78rem;font-weight:700;margin-top:2px;">{note}</div></div>', unsafe_allow_html=True)
     else:
-        buys = st.session_state["buys"]
-        all_t = st.session_state["trades"]
-        scan_time = st.session_state.get("scan_time","")
+        buys = st.session_state.get("buys", [])
+        all_t = st.session_state.get("trades", [])
+        scan_time = st.session_state.get("scan_time", "")
 
-        # Stats row
+        # Stats row — always show even if buys is empty after filtering
         s1,s2,s3,s4,s5,s6 = st.columns(6)
         s1.metric("Scanned", len(all_t))
-        s2.metric("BUY Signals", len(buys))
-        s3.metric("WATCH", len(all_t)-len(buys))
+        s2.metric(f"≥{min_conf:.0%} Conf", len(buys))
+        s3.metric("Below Threshold", len(all_t) - len(buys))
         penny_ct = len([t for t in all_t if t["is_penny"]])
         s4.metric("Penny Stocks", penny_ct)
         if buys:
@@ -755,7 +762,23 @@ with tab1:
         st.markdown("---")
 
         if not buys:
-            st.warning("No BUY signals found. Try lowering Min Confidence or removing filters.")
+            # Show all trades sorted by confidence so user can see what's available
+            st.warning(f"No signals at ≥{min_conf:.0%} confidence. Lower the **Min Confidence** slider to see results.")
+            if all_t:
+                best_available = sorted(all_t, key=lambda x: x["confidence"], reverse=True)[:5]
+                st.markdown(f"**Best available signals (top 5 of {len(all_t)} scanned):**")
+                _ba_cols = st.columns(min(5, len(best_available)))
+                for _col, t in zip(_ba_cols, best_available):
+                    _c = t["confidence"]
+                    _cc = "#10b981" if _c >= 0.55 else "#f59e0b"
+                    with _col:
+                        st.markdown(f"""
+                        <div class="stat-card" style="text-align:center;">
+                            <div style="font-size:0.65rem;color:#334155;">{t["sector"]}</div>
+                            <div style="font-size:1rem;font-weight:900;color:#f1f5f9;">{t["symbol"]}</div>
+                            <div style="font-size:1.1rem;font-weight:800;color:{_cc};">{_c:.0%}</div>
+                            <div style="font-size:0.72rem;color:#475569;">₹{t["price"]:,.2f}</div>
+                        </div>""", unsafe_allow_html=True)
         else:
             best = buys[0]
             st.markdown(f"### 🏆 #1 Best Trade — {scan_time}")
@@ -908,11 +931,14 @@ with tab2:
 
     if penny_scan_btn:
         penny_universe = get_universe([], [], True)
-        penny_trades = run_scan(penny_universe, capital, penny_max_price_filter, penny_min_conf, penny_only=True)
+        penny_trades, _, _ = run_scan(penny_universe, capital, penny_max_price_filter, penny_min_conf, penny_only=True)
         st.session_state["penny_trades"] = penny_trades
+        st.session_state["penny_min_conf"] = penny_min_conf
 
+    # Re-filter penny trades live when slider changes
     if "penny_trades" in st.session_state:
-        pt = st.session_state["penny_trades"]
+        _cur_penny_conf = penny_min_conf
+        pt = [t for t in st.session_state["penny_trades"] if t["confidence"] >= _cur_penny_conf]
         if not pt:
             st.info("No penny stock signals found. Try lowering confidence or increasing max price.")
         else:
