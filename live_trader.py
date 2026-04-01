@@ -280,20 +280,61 @@ def _chart_layout(title="", height=450):
     )
 
 # ── PARALLEL SCAN ─────────────────────────────────────────────────────────────
+from backend.engines.data_validator import get_validated_tick, generate_signal, clear_live_cache
+
+
 def _scan_one(args):
+    """
+    Validated scan pipeline per symbol:
+    1. Fetch validated tick (primary fast_info + secondary 1m bars)
+    2. Gate on is_valid — skip if data is stale or sources disagree
+    3. Use validated LTP as price (not stale OHLCV close)
+    4. Run TA indicators on 5m bars for signal scoring
+    5. Cross-check signal with validated VWAP
+    """
     sym, capital, max_price, min_conf, penny_only = args
     try:
+        # ── Step 1: Get validated live tick ──────────────────────────────────
+        tick = get_validated_tick(sym)
+
+        # ── Step 2: Fetch 5m bars for TA (uses cached OHLCV) ─────────────────
         engine = IntradayEngine(capital=capital)
         df = engine.fetch_intraday(sym, period="5d", interval="5m")
         if df.empty or len(df) < 30:
             return None
-        price = float(df["Close"].iloc[-1])
+
+        # ── Step 3: Use validated LTP if available, else fall back to bar close
+        if tick and tick.get("is_valid") and tick["price"] > 0:
+            price = tick["price"]
+            validated_vwap = tick.get("vwap", 0)
+            data_source = tick["source"]
+        else:
+            price = float(df["Close"].iloc[-1])
+            validated_vwap = 0
+            data_source = "ohlcv_fallback"
+
         if price > max_price:
             return None
         if penny_only and price > PENNY_MAX_PRICE:
             return None
+
+        # ── Step 4: TA scoring on 5m bars ────────────────────────────────────
         df = engine.add_indicators(df)
         sc = engine.score_stock(df)
+
+        # ── Step 5: Override VWAP with validated tick VWAP if available ───────
+        effective_vwap = validated_vwap if validated_vwap > 0 else sc["vwap"]
+
+        # Boost/penalise score based on validated VWAP position
+        vwap_boost = 0.0
+        if effective_vwap > 0:
+            if price > effective_vwap * 1.002:   # price clearly above VWAP
+                vwap_boost = 0.05
+            elif price < effective_vwap * 0.998:  # price clearly below VWAP
+                vwap_boost = -0.05
+
+        adjusted_score = float(np.clip(sc["score"] + vwap_boost, 0, 1))
+
         atr = max(sc["atr"], price * 0.005)
         entry = round(price, 2)
         sl = round(max(price - 1.5 * atr, price * 0.93), 2)
@@ -304,35 +345,50 @@ def _scan_one(args):
         qty = max(1, int(capital // price))
         clean = sym.replace(".NS", "")
         sector = SYMBOL_TO_SECTOR.get(clean, "Other")
+
+        # Today's volume from validated tick (more accurate than 5m bar sum)
+        live_volume = tick.get("volume", 0) if tick else 0
+        vol_ratio = sc["vol_ratio"]
+
         report = StockMetadata.generate_report(
             symbol=clean, price=price, sector=sector,
-            confidence=sc["score"], direction="UP" if sc["score"] >= 0.55 else "NEUTRAL",
+            confidence=adjusted_score,
+            direction="UP" if adjusted_score >= 0.55 else "NEUTRAL",
             predicted_return=0, volatility=0.2, rsi=sc["rsi"],
             entry=entry, target=t1, stop_loss=sl, mode="intraday",
         )
+
+        # Data quality badge
+        quality = "✅ Live" if data_source in ("merged", "fast_info") else ("⚡ 1m" if data_source == "1m_bars" else "⚠️ Cached")
+
         return {
             "symbol": clean, "yf_symbol": sym, "sector": sector,
             "price": entry, "qty": qty, "invested": round(qty * price, 2),
             "target_1": t1, "target_2": t2, "stop_loss": sl,
-            "confidence": sc["score"], "risk_reward": rr,
+            "confidence": adjusted_score, "risk_reward": rr,
             "profit": round(qty * (t1 - entry), 2),
             "loss": round(qty * (entry - sl), 2),
-            "rsi": sc["rsi"], "vwap": sc["vwap"],
-            "vol_ratio": sc["vol_ratio"], "supertrend": sc["supertrend"],
+            "rsi": sc["rsi"], "vwap": effective_vwap,
+            "vol_ratio": vol_ratio, "supertrend": sc["supertrend"],
             "reasons": sc["reasons"],
-            "signal": "BUY" if sc["score"] >= min_conf else "WATCH",
+            "signal": "BUY" if adjusted_score >= min_conf else "WATCH",
             "is_penny": price <= PENNY_MAX_PRICE,
             "risk_level": report["risk_level"],
             "holding": report["holding_duration"],
+            "data_quality": quality,
+            "data_source": data_source,
             "df": df,
         }
     except Exception:
         return None
 
+
 def run_scan(universe, capital, max_price, min_conf, penny_only=False):
-    prog = st.progress(0, text="🚀 Initialising parallel scan...")
+    # Clear stale live tick cache before each scan
+    clear_live_cache()
+    prog = st.progress(0, text="🚀 Initialising validated scan...")
     results, done, total = [], 0, len(universe)
-    with ThreadPoolExecutor(max_workers=15) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:   # reduced from 15 — avoids yfinance rate limits
         futures = {ex.submit(_scan_one, (sym, capital, max_price, min_conf, penny_only)): sym
                    for sym in universe}
         for fut in as_completed(futures):
@@ -621,6 +677,7 @@ with tab1:
                     <div class="price-big">₹{best["price"]:,.2f}</div>
                     <div style='margin-top:12px;'>
                         <span class="badge-buy">BUY &nbsp;{best["confidence"]:.0%} Confidence</span>
+                        <span style='margin-left:8px;font-size:0.68rem;color:#475569;'>{best.get("data_quality","")}</span>
                     </div>
                     <div style='margin-top:10px;'>
                         {''.join(f'<span class="reason-chip">{r}</span>' for r in best["reasons"])}
@@ -705,6 +762,7 @@ with tab1:
                 "Loss": f"-₹{t['loss']:,.2f}", "RSI": t["rsi"],
                 "Vol": f"{t['vol_ratio']:.1f}x", "ST": t["supertrend"],
                 "Risk": t["risk_level"], "Penny": "🪙" if t["is_penny"] else "",
+                "Data": t.get("data_quality", ""),
             } for i, t in enumerate(buys)])
             st.dataframe(tbl, use_container_width=True, hide_index=True, height=min(600, 55+38*len(tbl)))
 
