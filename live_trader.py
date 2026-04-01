@@ -278,3 +278,89 @@ def run_scan(universe, capital, max_price, min_conf, penny_only=False):
     prog.empty()
     results.sort(key=lambda x: (x["confidence"], x["risk_reward"]), reverse=True)
     return results
+
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+is_open = market_open()
+mkt = get_market_status()
+
+with st.sidebar:
+    st.markdown("""
+    <div style='text-align:center;padding:12px 0 18px;'>
+        <div style='font-size:2.2rem;'>⚡</div>
+        <div style='font-size:1.25rem;font-weight:900;color:#f1f5f9;letter-spacing:-0.02em;'>QuantSignal</div>
+        <div style='font-size:0.65rem;color:#334155;letter-spacing:0.12em;text-transform:uppercase;'>INDIA TRADING ENGINE v5.0</div>
+    </div>""", unsafe_allow_html=True)
+
+    dot = '<span class="live-dot"></span>' if is_open else "🔴 "
+    mkt_color = "#10b981" if is_open else "#ef4444"
+    st.markdown(f'<div style="color:{mkt_color};font-weight:700;font-size:0.85rem;">{dot}{mkt}</div>', unsafe_allow_html=True)
+    if is_open:
+        st.markdown(f'<div style="color:#475569;font-size:0.72rem;">⏱ {time_to_close()}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="color:#1e3a5f;font-size:0.68rem;margin-top:2px;">{datetime.now().strftime("%d %b %Y  %I:%M %p")}</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown('<div style="color:#475569;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">💰 Capital & Risk</div>', unsafe_allow_html=True)
+    capital = st.number_input("Capital (₹)", value=5000, min_value=500, max_value=10_000_000, step=500)
+    min_conf = st.slider("Min Confidence", 0.30, 0.90, 0.50, 0.05)
+    max_price = st.number_input("Max Stock Price (₹)", value=int(capital * 0.95), min_value=5, max_value=5_000_000)
+
+    st.markdown("---")
+    st.markdown('<div style="color:#475569;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">🔍 Filters</div>', unsafe_allow_html=True)
+
+    sector_filter = st.multiselect("Sectors (empty = all)", list(SECTOR_GROUPS.keys()), default=[], key="sf")
+    stock_filter = st.multiselect("Specific Stocks", ALL_SYMBOLS_CLEAN, default=[], key="stf")
+    penny_only = st.checkbox("🪙 Penny Stocks Only (≤₹50)", value=False)
+
+    st.markdown("---")
+    st.markdown('<div style="color:#475569;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">📅 Date Range</div>', unsafe_allow_html=True)
+    date_from = st.date_input("From", value=date.today() - timedelta(days=30))
+    date_to = st.date_input("To", value=date.today())
+
+    st.markdown("---")
+    auto_refresh = st.checkbox("🔄 Auto-refresh", value=False)
+    if auto_refresh:
+        refresh_sec = st.select_slider("Interval", [60, 120, 300, 600], value=300,
+                                        format_func=lambda x: f"{x//60}m")
+    else:
+        refresh_sec = 300
+
+    st.markdown("---")
+    st.markdown(f'<div style="color:#1e3a5f;font-size:0.68rem;">Universe: <b style="color:#3b82f6;">{len(INTRADAY_STOCKS)}</b> stocks | 14 sectors</div>', unsafe_allow_html=True)
+    st.caption("Not financial advice. Paper trade first.")
+
+# ── TOP HEADER ────────────────────────────────────────────────────────────────
+universe = get_universe(sector_filter, stock_filter, penny_only)
+
+hcol1, hcol2, hcol3, hcol4 = st.columns([3.5, 1, 1, 1])
+with hcol1:
+    live_badge = ('<span style="background:#065f46;color:#6ee7b7;padding:2px 9px;border-radius:5px;font-size:0.68rem;font-weight:800;letter-spacing:0.05em;">● LIVE</span>'
+                  if is_open else
+                  '<span style="background:#7f1d1d;color:#fca5a5;padding:2px 9px;border-radius:5px;font-size:0.68rem;font-weight:800;">● CLOSED</span>')
+    penny_badge = '<span style="background:#4c1d95;color:#c4b5fd;padding:2px 9px;border-radius:5px;font-size:0.68rem;font-weight:800;margin-left:6px;">🪙 PENNY MODE</span>' if penny_only else ""
+    st.markdown(f"""
+    <div style='display:flex;align-items:center;gap:10px;margin-bottom:2px;flex-wrap:wrap;'>
+        <span style='font-size:1.7rem;font-weight:900;color:#f8fafc;letter-spacing:-0.03em;'>⚡ QuantSignal India</span>
+        {live_badge}{penny_badge}
+    </div>
+    <div style='color:#334155;font-size:0.8rem;'>
+        <b style='color:#2563eb;'>{len(universe)}</b> stocks scanning •
+        <b style='color:#2563eb;'>14 sectors</b> •
+        {datetime.now().strftime("%d %b %Y %I:%M %p")}
+    </div>""", unsafe_allow_html=True)
+with hcol2:
+    scan_btn = st.button("🔍 SCAN NOW", type="primary", use_container_width=True)
+with hcol3:
+    best_btn = st.button("⚡ BEST TRADE", use_container_width=True)
+with hcol4:
+    predict_btn = st.button("🔮 PREDICT ALL", use_container_width=True)
+
+st.markdown("---")
+
+# ── TRIGGER SCAN ──────────────────────────────────────────────────────────────
+if scan_btn or best_btn:
+    trades = run_scan(universe, capital, max_price, min_conf, penny_only)
+    st.session_state["trades"] = trades
+    st.session_state["buys"] = [t for t in trades if t["signal"] == "BUY"]
+    st.session_state["pennies"] = [t for t in trades if t["is_penny"]]
+    st.session_state["scan_time"] = datetime.now().strftime("%I:%M:%S %p")
+    st.session_state["scan_date"] = datetime.now().strftime("%d %b %Y")
