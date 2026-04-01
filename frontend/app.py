@@ -453,3 +453,111 @@ elif page == "🔬 Multi-Analyzer":
             height=600, margin=dict(t=40, b=40), xaxis_rangeslider_visible=False,
         )
         st.plotly_chart(fig_price, use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GLOBAL MACRO PAGE
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "🌍 Global Macro":
+    st.title("🌍 Global Macro Dashboard")
+    st.caption("Live global indices, USD/INR, crude oil, gold — and their impact on Indian markets.")
+
+    if st.button("🔄 Refresh Global Data", type="primary", use_container_width=True):
+        with st.spinner("Fetching global market data..."):
+            global_data = {}
+            for name, ticker in GLOBAL_INDICES.items():
+                try:
+                    df_g = DataService.fetch_ohlcv(ticker, period="1mo")
+                    if not df_g.empty:
+                        price = float(df_g["Close"].iloc[-1])
+                        chg_1d = float((df_g["Close"].iloc[-1] / df_g["Close"].iloc[-2] - 1) * 100) if len(df_g) >= 2 else 0
+                        chg_1m = float((df_g["Close"].iloc[-1] / df_g["Close"].iloc[0] - 1) * 100) if len(df_g) >= 2 else 0
+                        global_data[name] = {"price": price, "chg_1d": chg_1d, "chg_1m": chg_1m, "ticker": ticker}
+                except Exception:
+                    pass
+            st.session_state["global_data"] = global_data
+
+    if "global_data" in st.session_state:
+        gd = st.session_state["global_data"]
+
+        # ── Metrics grid ──────────────────────────────────────────────────────
+        st.subheader("Key Global Indicators")
+        items = list(gd.items())
+        for row_start in range(0, len(items), 4):
+            row_items = items[row_start:row_start + 4]
+            cols = st.columns(len(row_items))
+            for col, (name, data) in zip(cols, row_items):
+                delta_str = f"{data['chg_1d']:+.2f}%"
+                col.metric(name, f"{data['price']:,.2f}", delta_str)
+
+        st.markdown("---")
+
+        # ── Impact analysis ───────────────────────────────────────────────────
+        st.subheader("India Market Impact Analysis")
+        impact_rows = []
+        for name, data in gd.items():
+            chg = data["chg_1d"]
+            if name == "VIX":
+                impact = "🔴 Risk-Off" if data["price"] > 25 else ("🟡 Caution" if data["price"] > 18 else "🟢 Risk-On")
+                note = f"VIX at {data['price']:.1f} — {'elevated fear' if data['price'] > 25 else 'normal'}"
+            elif name == "S&P 500":
+                impact = "🟢 Positive" if chg > 0.5 else ("🔴 Negative" if chg < -0.5 else "🟡 Neutral")
+                note = "Global risk appetite indicator"
+            elif name == "USD/INR":
+                impact = "🔴 Bearish INR" if chg > 0.3 else ("🟢 Bullish INR" if chg < -0.3 else "🟡 Stable")
+                note = "Rupee depreciation hurts importers (oil, metals)"
+            elif name == "Crude Oil":
+                impact = "🔴 Inflationary" if chg > 1 else ("🟢 Positive" if chg < -1 else "🟡 Neutral")
+                note = "India imports ~85% crude — rising oil = CAD pressure"
+            elif name == "Gold":
+                impact = "🟡 Risk-Off" if chg > 0.5 else "🟡 Neutral"
+                note = "Gold rising = safe haven demand"
+            elif name == "DXY":
+                impact = "🔴 EM Headwind" if chg > 0.3 else ("🟢 EM Tailwind" if chg < -0.3 else "🟡 Neutral")
+                note = "Strong dollar = FII outflows from India"
+            else:
+                impact = "🟡 Monitor"
+                note = "Global market indicator"
+            impact_rows.append({"Indicator": name, "Price": f"{data['price']:,.2f}",
+                                 "1D Change": f"{chg:+.2f}%", "India Impact": impact, "Note": note})
+
+        impact_df = pd.DataFrame(impact_rows)
+        st.dataframe(impact_df, use_container_width=True, hide_index=True)
+
+        # ── Correlation chart ─────────────────────────────────────────────────
+        st.subheader("30-Day Performance Comparison")
+        fig_global = go.Figure()
+        colors_g = ["#6366f1", "#10b981", "#f59e0b", "#06b6d4", "#ec4899", "#84cc16"]
+        plot_indices = ["S&P 500", "NASDAQ", "Nikkei 225", "Crude Oil", "Gold", "USD/INR"]
+        for i, name in enumerate(plot_indices):
+            if name in gd:
+                try:
+                    df_g = DataService.fetch_ohlcv(GLOBAL_INDICES[name], period="1mo")
+                    if not df_g.empty:
+                        normalized = (df_g["Close"] / df_g["Close"].iloc[0] - 1) * 100
+                        fig_global.add_trace(go.Scatter(
+                            x=df_g.index, y=normalized, mode="lines",
+                            line=dict(color=colors_g[i % len(colors_g)], width=2),
+                            name=name,
+                        ))
+                except Exception:
+                    pass
+        fig_global.add_hline(y=0, line_dash="dash", line_color="#475569")
+        fig_global.update_layout(
+            title="Normalized 30-Day Returns (%)",
+            template="plotly_dark", paper_bgcolor="#0a0f1e", plot_bgcolor="#0d1b2e",
+            yaxis_title="Return (%)", height=420, margin=dict(t=40, b=40),
+        )
+        st.plotly_chart(fig_global, use_container_width=True)
+
+        # ── Sector impact matrix ──────────────────────────────────────────────
+        st.subheader("Sector Sensitivity to Global Factors")
+        sensitivity = {
+            "Sector": ["IT", "Pharma", "Metals", "Energy", "Auto", "FMCG", "Finance", "Defence", "Infra"],
+            "USD/INR ↑": ["🟢 +", "🟢 +", "🔴 -", "🔴 -", "🔴 -", "🟡 ~", "🔴 -", "🟡 ~", "🟡 ~"],
+            "Crude ↑":   ["🟡 ~", "🟡 ~", "🟡 ~", "🟢 +", "🔴 -", "🔴 -", "🟡 ~", "🟡 ~", "🔴 -"],
+            "VIX ↑":     ["🔴 -", "🟡 ~", "🔴 -", "🔴 -", "🔴 -", "🟢 +", "🔴 -", "🟢 +", "🟡 ~"],
+            "S&P ↑":     ["🟢 +", "🟡 ~", "🟢 +", "🟡 ~", "🟢 +", "🟡 ~", "🟢 +", "🟡 ~", "🟡 ~"],
+            "DXY ↑":     ["🟢 +", "🟢 +", "🔴 -", "🔴 -", "🔴 -", "🟡 ~", "🔴 -", "🟡 ~", "🟡 ~"],
+        }
+        st.dataframe(pd.DataFrame(sensitivity), use_container_width=True, hide_index=True)
