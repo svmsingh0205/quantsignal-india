@@ -73,3 +73,97 @@ hr{border-color:#0f2040!important;margin:.8rem 0!important;}
 ::-webkit-scrollbar-thumb{background:#1e3a5f;border-radius:3px;}
 </style>
 """, unsafe_allow_html=True)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+ALL_SYMBOLS_CLEAN = sorted(set(s.replace(".NS", "") for s in INTRADAY_STOCKS))
+
+def market_open() -> bool:
+    now = datetime.now()
+    return now.weekday() < 5 and dtime(9, 15) <= now.time() <= dtime(15, 30)
+
+def _layout(title="", height=450):
+    return dict(
+        template="plotly_dark", paper_bgcolor="#04080f", plot_bgcolor="#080f1e",
+        height=height, margin=dict(t=35 if title else 10, b=10, l=50, r=20),
+        font=dict(family="Inter", size=11, color="#94a3b8"),
+        legend=dict(orientation="h", y=1.02, bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+        xaxis=dict(gridcolor="#0a1628", showgrid=True, zeroline=False),
+        yaxis=dict(gridcolor="#0a1628", showgrid=True, zeroline=False),
+        title=dict(text=title, font=dict(size=13, color="#e2e8f0")) if title else None,
+    )
+
+def signal_badge(sig: str) -> str:
+    if "BUY" in sig.upper():
+        return f'<span class="badge-buy">{sig}</span>'
+    if "SELL" in sig.upper() or "AVOID" in sig.upper():
+        return f'<span class="badge-sell">{sig}</span>'
+    return f'<span class="badge-watch">{sig}</span>'
+
+def score_bar(score: float, width: int = 120) -> str:
+    pct = int(score * 100)
+    color = "#10b981" if score >= 0.65 else ("#f59e0b" if score >= 0.50 else "#ef4444")
+    return (f'<div style="background:#0f2040;border-radius:4px;width:{width}px;height:8px;overflow:hidden;">'
+            f'<div style="background:{color};width:{pct}%;height:100%;border-radius:4px;"></div></div>'
+            f'<span style="color:{color};font-size:.72rem;font-weight:700;">{pct}%</span>')
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+is_open = market_open()
+mkt_status = get_market_status()
+
+with st.sidebar:
+    st.markdown("""
+    <div style='text-align:center;padding:10px 0 16px;'>
+        <div style='font-size:2rem;'>⚡</div>
+        <div style='font-size:1.2rem;font-weight:900;color:#f1f5f9;'>QuantSignal India</div>
+        <div style='font-size:.62rem;color:#334155;letter-spacing:.12em;text-transform:uppercase;'>DUAL-MODE ENGINE v6.0</div>
+    </div>""", unsafe_allow_html=True)
+
+    dot = '<span class="live-dot"></span>' if is_open else "🔴 "
+    mkt_color = "#10b981" if is_open else "#ef4444"
+    st.markdown(f'<div style="color:{mkt_color};font-weight:700;font-size:.82rem;">{dot}{mkt_status}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="color:#1e3a5f;font-size:.65rem;">{datetime.now().strftime("%d %b %Y  %I:%M %p")}</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    # ── Mode selector ─────────────────────────────────────────────────────────
+    st.markdown('<div style="color:#475569;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">🎯 Trading Mode</div>', unsafe_allow_html=True)
+    mode = st.radio(
+        "mode",
+        ["📡 Intraday", "📦 Delivery"],
+        label_visibility="collapsed",
+        horizontal=True,
+    )
+
+    st.markdown("---")
+    st.markdown('<div style="color:#475569;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">💰 Capital & Risk</div>', unsafe_allow_html=True)
+    capital = st.number_input("Capital (₹)", value=50_000, min_value=1_000, max_value=10_000_000, step=5_000)
+    risk_pct = st.slider("Risk per Trade (%)", 0.5, 5.0, 2.0, 0.5) / 100
+
+    st.markdown("---")
+    # ── Mode-specific sidebar controls ───────────────────────────────────────
+    if "Intraday" in mode:
+        st.markdown('<div style="color:#475569;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">📅 Intraday Settings</div>', unsafe_allow_html=True)
+        trade_date = st.date_input("Trading Date", value=date.today(), max_value=date.today())
+        intra_top_n = st.slider("Top N Stocks", 5, 20, 10, 1)
+        intra_sector_filter = st.multiselect("Sector Filter (optional)", list(SECTOR_GROUPS.keys()), default=[])
+        intra_stock_filter = st.multiselect("Specific Stocks (optional)", ALL_SYMBOLS_CLEAN, default=[])
+        auto_refresh = st.checkbox("🔄 Auto-refresh (5 min)", value=False)
+    else:
+        st.markdown('<div style="color:#475569;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">📦 Delivery Settings</div>', unsafe_allow_html=True)
+        holding_choice = st.select_slider(
+            "Holding Period",
+            options=["10 Days", "20 Days", "30 Days", "60 Days", "Custom"],
+            value="30 Days",
+        )
+        if holding_choice == "Custom":
+            custom_days = st.number_input("Custom Days", min_value=5, max_value=365, value=45, step=5)
+            holding_days = custom_days
+        else:
+            holding_days = HOLDING_PERIODS[holding_choice]
+
+        delivery_top_n = st.slider("Top N Stocks", 5, 20, 10, 1)
+        delivery_sector_filter = st.multiselect("Sector Filter (optional)", list(SECTOR_GROUPS.keys()), default=[])
+        delivery_stock_filter = st.multiselect("Specific Stocks (optional)", ALL_SYMBOLS_CLEAN, default=[])
+
+    st.markdown("---")
+    st.markdown(f'<div style="color:#1e3a5f;font-size:.65rem;">Universe: <b style="color:#3b82f6;">{len(INTRADAY_STOCKS)}</b> stocks · 14 sectors</div>', unsafe_allow_html=True)
+    st.caption("Not financial advice. Paper trade first.")
