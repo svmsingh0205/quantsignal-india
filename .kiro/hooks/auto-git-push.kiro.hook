@@ -1,0 +1,22 @@
+{
+  "enabled": true,
+  "name": "Auto Push to GitHub",
+  "description": "Automatically commits and pushes all changes to GitHub after any file is saved",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "*.py",
+      "*.toml",
+      "*.txt",
+      "*.md"
+    ]
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "cd \"C:\\Users\\Lenovo\\fi\" && \"C:\\Program Files\\Git\\cmd\\git.exe\" add . && \"C:\\Program Files\\Git\\cmd\\git.exe\" commit -m \"Auto-sync: updated project files\" --allow-empty && \"C:\\Program Files\\Git\\cmd\\git.exe\" push origin main",
+    "timeout": 60
+  },
+  "workspaceFolderName": "fi",
+  "shortName": "auto-git-push"
+}

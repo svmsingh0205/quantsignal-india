@@ -1,0 +1,10 @@
+name: Auto Push on Change
+on:
+  push:
+    branches: [main]
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code pushed
+        run: echo "New code pushed to main branch successfully"
