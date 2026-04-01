@@ -551,3 +551,113 @@ with tab1:
     if auto_refresh and "buys" in st.session_state:
         _time.sleep(refresh_sec)
         st.rerun()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — PENNY STOCKS
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.markdown("""
+    <div class="penny-header">
+        <div style='font-size:1.3rem;font-weight:900;color:#c4b5fd;'>🪙 Penny Stock Scanner</div>
+        <div style='color:#7c3aed;font-size:0.82rem;margin-top:4px;'>
+            Stocks priced ≤ ₹50 • High risk, high reward • Always use strict stop-loss
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    col_p1, col_p2, col_p3 = st.columns([2, 1, 1])
+    with col_p1:
+        penny_max_price_filter = st.slider("Max Price (₹)", 5, 50, 50, 5)
+    with col_p2:
+        penny_min_conf = st.slider("Min Confidence", 0.30, 0.80, 0.40, 0.05, key="penny_conf")
+    with col_p3:
+        penny_scan_btn = st.button("🪙 Scan Penny Stocks", type="primary", use_container_width=True)
+
+    if penny_scan_btn:
+        penny_universe = get_universe([], [], True)
+        penny_trades = run_scan(penny_universe, capital, penny_max_price_filter, penny_min_conf, penny_only=True)
+        st.session_state["penny_trades"] = penny_trades
+
+    if "penny_trades" in st.session_state:
+        pt = st.session_state["penny_trades"]
+        if not pt:
+            st.info("No penny stock signals found. Try lowering confidence or increasing max price.")
+        else:
+            # Summary
+            pm1, pm2, pm3, pm4 = st.columns(4)
+            pm1.metric("Penny Stocks Found", len(pt))
+            pm2.metric("BUY Signals", len([t for t in pt if t["signal"]=="BUY"]))
+            if pt:
+                pm3.metric("Cheapest", f"₹{min(t['price'] for t in pt):,.2f}")
+                pm4.metric("Best Confidence", f"{max(t['confidence'] for t in pt):.0%}")
+
+            st.markdown("---")
+            st.markdown("### 🪙 Penny Stock Detailed Report")
+
+            for t in pt[:20]:
+                signal_color = "#10b981" if t["signal"]=="BUY" else "#f59e0b"
+                factors = StockMetadata.get_global_factors(t["sector"])
+                with st.expander(
+                    f"🪙 {t['symbol']} — ₹{t['price']:,.2f} — {t['signal']} — Conf {t['confidence']:.0%} — {t['risk_level']}"
+                ):
+                    rc1, rc2, rc3, rc4, rc5 = st.columns(5)
+                    rc1.metric("Price", f"₹{t['price']:,.2f}")
+                    rc2.metric("Target", f"₹{t['target_1']:,.2f}", f"+{((t['target_1']-t['price'])/t['price']*100):.1f}%")
+                    rc3.metric("Stop Loss", f"₹{t['stop_loss']:,.2f}", f"-{((t['price']-t['stop_loss'])/t['price']*100):.1f}%", delta_color="inverse")
+                    rc4.metric("R:R Ratio", f"{t['risk_reward']}x")
+                    rc5.metric("Qty (₹{:,.0f})".format(capital), t["qty"])
+
+                    st.markdown(f"""
+                    <div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;'>
+                        <div class="report-card">
+                            <div style='font-size:0.72rem;color:#475569;font-weight:700;text-transform:uppercase;margin-bottom:8px;'>📊 Technical Signals</div>
+                            {''.join(f'<span class="reason-chip">{r}</span>' for r in t["reasons"])}
+                            <div style='margin-top:8px;color:#64748b;font-size:0.75rem;'>
+                                RSI: <b style='color:#a78bfa;'>{t["rsi"]}</b> &nbsp;|&nbsp;
+                                VWAP: <b style='color:#f59e0b;'>₹{t["vwap"]}</b> &nbsp;|&nbsp;
+                                Volume: <b style='color:#06b6d4;'>{t["vol_ratio"]:.1f}x</b> &nbsp;|&nbsp;
+                                Supertrend: <b style='color:{"#10b981" if t["supertrend"]=="BUY" else "#ef4444"};'>{t["supertrend"]}</b>
+                            </div>
+                        </div>
+                        <div class="report-card">
+                            <div style='font-size:0.72rem;color:#475569;font-weight:700;text-transform:uppercase;margin-bottom:8px;'>⚠️ Risk Assessment</div>
+                            <div style='font-size:1.1rem;font-weight:800;'>{t["risk_level"]}</div>
+                            <div style='color:#64748b;font-size:0.75rem;margin-top:6px;'>
+                                Sector: <b style='color:#a5b4fc;'>{t["sector"]}</b><br>
+                                Holding: <b style='color:#f59e0b;'>{t["holding"]}</b><br>
+                                Invest: <b style='color:#10b981;'>₹{t["invested"]:,.0f}</b>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="report-card" style='margin-top:12px;'>
+                        <div style='font-size:0.72rem;color:#475569;font-weight:700;text-transform:uppercase;margin-bottom:8px;'>🌍 Sector Theme: <span style='color:#3b82f6;'>{factors["theme"]}</span></div>
+                        <div>{''.join(f'<span class="factor-pos">✅ {f}</span>' for f in factors["positive"][:3])}</div>
+                        <div style='margin-top:6px;'>{''.join(f'<span class="factor-neg">⚠️ {f}</span>' for f in factors["negative"][:2])}</div>
+                    </div>
+                    <div style='margin-top:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.2);border-radius:8px;padding:10px;font-size:0.75rem;color:#fca5a5;'>
+                        ⚠️ <b>Penny Stock Warning:</b> High volatility, low liquidity. Use strict stop-loss. Never invest more than 2-5% of capital in a single penny stock.
+                    </div>""", unsafe_allow_html=True)
+
+                    if "df" in t and not t["df"].empty:
+                        dc = t["df"].tail(60)
+                        fm = go.Figure()
+                        fm.add_trace(go.Candlestick(
+                            x=dc.index, open=dc["Open"], high=dc["High"], low=dc["Low"], close=dc["Close"],
+                            increasing=dict(line=dict(color="#10b981"),fillcolor="#10b981"),
+                            decreasing=dict(line=dict(color="#ef4444"),fillcolor="#ef4444"),
+                        ))
+                        if "VWAP" in dc.columns:
+                            fm.add_trace(go.Scatter(x=dc.index, y=dc["VWAP"], mode="lines",
+                                line=dict(color="#f59e0b",width=1.2,dash="dot"), name="VWAP"))
+                        fm.add_hline(y=t["price"], line_color="#6366f1", annotation_text="Entry")
+                        fm.add_hline(y=t["target_1"], line_color="#10b981", line_dash="dash", annotation_text="T1")
+                        fm.add_hline(y=t["stop_loss"], line_color="#ef4444", line_dash="dash", annotation_text="SL")
+                        fm.update_layout(**_chart_layout(height=280))
+                        fm.update_layout(xaxis_rangeslider_visible=False, showlegend=True)
+                        st.plotly_chart(fm, use_container_width=True)
+    else:
+        st.markdown("""
+        <div style='text-align:center;padding:50px;background:#0a1628;border:1px solid #0f2040;border-radius:16px;'>
+            <div style='font-size:2.5rem;'>🪙</div>
+            <div style='font-size:1.1rem;color:#94a3b8;margin-top:10px;'>Click "Scan Penny Stocks" to find high-potential low-price stocks</div>
+            <div style='color:#334155;margin-top:6px;font-size:0.82rem;'>Stocks priced ≤ ₹50 with strong technical signals</div>
+        </div>""", unsafe_allow_html=True)
