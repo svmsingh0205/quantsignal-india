@@ -24,6 +24,7 @@ from backend.engines.intraday_engine import IntradayEngine, get_market_status
 from backend.engines.data_service import DataService
 from backend.engines.prediction_engine import PredictionEngine
 from backend.engines.stock_metadata import StockMetadata, GLOBAL_FACTORS, PENNY_MAX_PRICE
+from backend.engines.risk_engine import RiskEngine
 from backend.intraday_config import INTRADAY_STOCKS, SECTOR_GROUPS
 
 st.set_page_config(
@@ -268,6 +269,24 @@ def _quick_search(symbol: str) -> dict | None:
             return data
     return None
 
+def _render_indicator_grid(indicators: list) -> None:
+    """Render a row of indicator cards."""
+    cols = st.columns(min(4, len(indicators)))
+    for i, ind in enumerate(indicators):
+        col = cols[i % len(cols)]
+        score = ind["score"]
+        color = "#10b981" if score >= 0.60 else ("#ef4444" if score <= 0.40 else "#f59e0b")
+        icon = "🟢" if score >= 0.60 else ("🔴" if score <= 0.40 else "🟡")
+        with col:
+            st.markdown(f"""
+            <div class="stat-card" style="text-align:left;margin-bottom:8px;">
+                <div style="font-size:0.65rem;color:#475569;text-transform:uppercase;font-weight:700;">{ind["name"]}</div>
+                <div style="font-size:1.2rem;font-weight:900;color:{color};margin:4px 0;">{icon} {score:.0%}</div>
+                <div style="font-size:0.72rem;color:#94a3b8;">{ind["signal"]} · {ind["trend"]}</div>
+                <div style="font-size:0.65rem;color:#334155;margin-top:4px;">{ind["note"][:60]}{'…' if len(ind["note"])>60 else ''}</div>
+            </div>""", unsafe_allow_html=True)
+
+
 def _chart_layout(title="", height=450):
     return dict(
         template="plotly_dark", paper_bgcolor="#04080f", plot_bgcolor="#080f1e",
@@ -281,6 +300,50 @@ def _chart_layout(title="", height=450):
 
 # ── PARALLEL SCAN ─────────────────────────────────────────────────────────────
 from backend.engines.data_validator import get_validated_tick, generate_signal, clear_live_cache
+from backend.engines.market_context import get_market_context, get_market_bias_score, get_position_size_multiplier
+
+
+# ── _predict_one defined at module level so it's always available ─────────────
+def _predict_one(sym: str) -> dict | None:
+    """Fetch and predict next-day direction for a single symbol."""
+    try:
+        df = DataService.fetch_ohlcv(sym, period="1y")
+        if df.empty or len(df) < 60:
+            return None
+        pred = PredictionEngine.predict_next_day(df)
+        if not pred or "error" in pred:
+            return None
+        clean = sym.replace(".NS", "")
+        sector = SYMBOL_TO_SECTOR.get(clean, "Other")
+        price = pred["current_price"]
+        if price <= 0:
+            return None
+        report = StockMetadata.generate_report(
+            symbol=clean, price=price, sector=sector,
+            confidence=pred["confidence"], direction=pred["direction"],
+            predicted_return=pred["predicted_return"],
+            volatility=pred.get("volatility", 20) / 100,
+            rsi=pred.get("rsi", 50),
+            entry=price, target=pred["predicted_price"],
+            stop_loss=price * 0.97, mode="swing",
+        )
+        return {
+            "symbol": clean, "sector": sector,
+            "price": price,
+            "predicted": pred["predicted_price"],
+            "return_pct": pred["predicted_return"],
+            "direction": pred["direction"],
+            "confidence": pred["confidence"],
+            "rsi": pred.get("rsi", 50),
+            "volatility": pred.get("volatility", 20),
+            "conditions": pred.get("market_conditions", []),
+            "risk_level": report["risk_level"],
+            "signal": report["signal"],
+            "is_penny": price <= PENNY_MAX_PRICE,
+            "factors": StockMetadata.get_global_factors(sector),
+        }
+    except Exception:
+        return None
 
 
 def _scan_one(args):
@@ -291,8 +354,9 @@ def _scan_one(args):
     3. Use validated LTP as price (not stale OHLCV close)
     4. Run TA indicators on 5m bars for signal scoring
     5. Cross-check signal with validated VWAP
+    6. Apply market context bias (India VIX + global macro)
     """
-    sym, capital, max_price, min_conf, penny_only = args
+    sym, capital, max_price, min_conf, penny_only, mkt_bias, psm = args
     try:
         # ── Step 1: Get validated live tick ──────────────────────────────────
         tick = get_validated_tick(sym)
@@ -335,6 +399,14 @@ def _scan_one(args):
 
         adjusted_score = float(np.clip(sc["score"] + vwap_boost, 0, 1))
 
+        # ── Step 6: Apply market context bias ────────────────────────────────
+        # Boost score in bullish market, penalise in bearish
+        mkt_boost = (mkt_bias - 0.5) * 0.20   # ±0.10 max adjustment
+        adjusted_score = float(np.clip(adjusted_score + mkt_boost, 0, 1))
+
+        # Scale position size by market context multiplier
+        effective_capital = capital * psm
+
         atr = max(sc["atr"], price * 0.005)
         entry = round(price, 2)
         sl = round(max(price - 1.5 * atr, price * 0.93), 2)
@@ -342,7 +414,7 @@ def _scan_one(args):
         t2 = round(price + 3.0 * atr, 2)
         risk = entry - sl
         rr = round((t1 - entry) / risk, 2) if risk > 0 else 0
-        qty = max(1, int(capital // price))
+        qty = max(1, int(effective_capital // price))
         clean = sym.replace(".NS", "")
         sector = SYMBOL_TO_SECTOR.get(clean, "Other")
 
@@ -386,10 +458,21 @@ def _scan_one(args):
 def run_scan(universe, capital, max_price, min_conf, penny_only=False):
     # Clear stale live tick cache before each scan
     clear_live_cache()
-    prog = st.progress(0, text="🚀 Initialising validated scan...")
+
+    # Fetch market context once — shared across all workers
+    try:
+        ctx = get_market_context()
+        mkt_bias = ctx["market_bias_score"]
+        psm = ctx["position_size_mult"]
+        intraday_ok = ctx["intraday_filter"]
+        mkt_label = ctx["market_bias_label"]
+    except Exception:
+        mkt_bias, psm, intraday_ok, mkt_label = 0.5, 0.75, True, "NEUTRAL"
+
+    prog = st.progress(0, text=f"🚀 Market: {mkt_label} | PSM: {psm:.0%} | Scanning…")
     results, done, total = [], 0, len(universe)
-    with ThreadPoolExecutor(max_workers=10) as ex:   # reduced from 15 — avoids yfinance rate limits
-        futures = {ex.submit(_scan_one, (sym, capital, max_price, min_conf, penny_only)): sym
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(_scan_one, (sym, capital, max_price, min_conf, penny_only, mkt_bias, psm)): sym
                    for sym in universe}
         for fut in as_completed(futures):
             done += 1
@@ -399,7 +482,7 @@ def run_scan(universe, capital, max_price, min_conf, penny_only=False):
                 results.append(res)
     prog.empty()
     results.sort(key=lambda x: (x["confidence"], x["risk_reward"]), reverse=True)
-    return results
+    return results, mkt_label, mkt_bias
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 is_open = market_open()
@@ -521,14 +604,24 @@ with hcol3:
     best_btn = st.button("⚡ BEST", use_container_width=True)
 with hcol4:
     predict_btn = st.button("🔮 PREDICT", use_container_width=True)
+    if predict_btn:
+        # Flag for Tab 3 to pick up — doesn't run scan here
+        st.session_state["_trigger_predict"] = True
 
 # ── SEARCH RESULT CARD ────────────────────────────────────────────────────────
-if (_search_btn or st.session_state.get("_prev_search") != _search_sym) and _search_sym:
-    st.session_state["_prev_search"] = _search_sym
+# Only trigger on explicit Go button click — not on every rerun
+if _search_btn and _search_sym:
+    st.session_state["_search_result_sym"] = _search_sym
     with st.spinner(f"Fetching {_search_sym}…"):
         _snap = _quick_search(_search_sym)
-    if _snap is None:
-        st.error(f"❌ Could not find data for **{_search_sym}**. Check the symbol and try again.")
+    st.session_state["_search_snap"] = _snap
+
+# Display cached search result
+if st.session_state.get("_search_result_sym"):
+    _snap = st.session_state.get("_search_snap")
+    _displayed_sym = st.session_state["_search_result_sym"]
+    if not _snap:
+        st.error(f"❌ Could not find data for **{_displayed_sym}**. Check the symbol and try again.")
     else:
         _chg_color = "#10b981" if _snap["chg"] >= 0 else "#ef4444"
         _arrow = "▲" if _snap["chg"] >= 0 else "▼"
@@ -593,15 +686,17 @@ st.markdown("---")
 
 # ── TRIGGER SCAN ──────────────────────────────────────────────────────────────
 if scan_btn or best_btn:
-    trades = run_scan(universe, capital, max_price, min_conf, penny_only)
+    trades, mkt_label, mkt_bias = run_scan(universe, capital, max_price, min_conf, penny_only)
     st.session_state["trades"] = trades
     st.session_state["buys"] = [t for t in trades if t["signal"] == "BUY"]
     st.session_state["pennies"] = [t for t in trades if t["is_penny"]]
     st.session_state["scan_time"] = _now_ist().strftime("%I:%M:%S %p IST")
     st.session_state["scan_date"] = scan_date.strftime("%d %b %Y")
+    st.session_state["mkt_label"] = mkt_label
+    st.session_state["mkt_bias"] = mkt_bias
 
 # ── MAIN TABS ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📡 Live Signals",
     "🪙 Penny Stocks",
     "🔮 Next-Day Picks",
@@ -609,6 +704,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🔎 Stock Explorer",
     "📋 Reports",
     "🔍 Deep Dive",
+    "📊 Market Context",
 ])
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -917,7 +1013,7 @@ with tab3:
     with nd_c4:
         nd_btn = st.button("🔮 Run Predictions", type="primary", use_container_width=True)
 
-    if nd_btn or predict_btn:
+    if nd_btn or st.session_state.pop("_trigger_predict", False):
         if nd_stocks:
             nd_universe = [f"{s}.NS" for s in nd_stocks]
         elif nd_sectors:
@@ -934,48 +1030,6 @@ with tab3:
         nd_processed = 0
         nd_skipped = 0
         total2 = len(nd_universe)
-
-        def _predict_one(sym):
-            try:
-                df = DataService.fetch_ohlcv(sym, period="1y")
-                if df.empty or len(df) < 60:
-                    return None
-                pred = PredictionEngine.predict_next_day(df)
-                if not pred or "error" in pred:
-                    return None
-                clean = sym.replace(".NS", "")
-                sector = SYMBOL_TO_SECTOR.get(clean, "Other")
-                price = pred["current_price"]
-                if price <= 0:
-                    return None
-                report = StockMetadata.generate_report(
-                    symbol=clean, price=price, sector=sector,
-                    confidence=pred["confidence"], direction=pred["direction"],
-                    predicted_return=pred["predicted_return"],
-                    volatility=pred.get("volatility", 20) / 100,
-                    rsi=pred.get("rsi", 50),
-                    entry=price,
-                    target=pred["predicted_price"],
-                    stop_loss=price * 0.97,
-                    mode="swing",
-                )
-                return {
-                    "symbol": clean, "sector": sector,
-                    "price": price,
-                    "predicted": pred["predicted_price"],
-                    "return_pct": pred["predicted_return"],
-                    "direction": pred["direction"],
-                    "confidence": pred["confidence"],
-                    "rsi": pred.get("rsi", 50),
-                    "volatility": pred.get("volatility", 20),
-                    "conditions": pred.get("market_conditions", []),
-                    "risk_level": report["risk_level"],
-                    "signal": report["signal"],
-                    "is_penny": price <= PENNY_MAX_PRICE,
-                    "factors": StockMetadata.get_global_factors(sector),
-                }
-            except Exception as _e:
-                return None
 
         done2 = 0
         all_preds = []   # keep ALL results for debug, filter after
@@ -1121,6 +1175,10 @@ with tab4:
         mp_btn = st.button("📈 Generate Forecast", type="primary", use_container_width=True)
 
     if mp_btn:
+        # Clear stale result if symbol changed
+        if st.session_state.get("_mp_last_sym") != mp_symbol:
+            st.session_state.pop("mp_result", None)
+        st.session_state["_mp_last_sym"] = mp_symbol
         with st.spinner(f"Running ML forecast for {mp_symbol}..."):
             df_mp = DataService.fetch_ohlcv(f"{mp_symbol}.NS", period="2y")
             if df_mp.empty:
@@ -1299,6 +1357,10 @@ with tab5:
         ex_btn = st.button("🔎 Analyse", type="primary", use_container_width=True)
 
     if ex_btn:
+        # Clear stale result if symbol changed
+        if st.session_state.get("_ex_last_sym") != ex_sym:
+            st.session_state.pop("ex_result", None)
+        st.session_state["_ex_last_sym"] = ex_sym
         with st.spinner(f"Analysing {ex_sym}..."):
             df_ex = DataService.fetch_ohlcv(f"{ex_sym}.NS", period=ex_period)
             df_ex_1y = DataService.fetch_ohlcv(f"{ex_sym}.NS", period="1y")
@@ -1481,6 +1543,10 @@ with tab6:
         rp_btn = st.button("📋 Generate Report", type="primary", use_container_width=True)
 
     if rp_btn:
+        # Clear stale result if symbol changed
+        if st.session_state.get("_rp_last_sym") != rp_sym:
+            st.session_state.pop("rp_result", None)
+        st.session_state["_rp_last_sym"] = rp_sym
         with st.spinner(f"Generating report for {rp_sym}..."):
             df_rp = DataService.fetch_ohlcv(f"{rp_sym}.NS", period="1y")
             pred_rp = PredictionEngine.predict_next_day(df_rp) if len(df_rp) >= 100 else {}
@@ -1560,7 +1626,7 @@ with tab6:
                 <div>
                     <div style='color:#475569;font-size:0.68rem;text-transform:uppercase;font-weight:700;margin-bottom:6px;'>📈 Risk Metrics</div>
                     <div style='color:#94a3b8;font-size:0.82rem;'>Risk Level: <b>{rep["risk_level"]}</b></div>
-                    <div style='color:#94a3b8;font-size:0.82rem;'>Volatility: <b style='color:#f59e0b;'>{rep["vol"]*100:.1f}%</b></div>
+                    <div style='color:#94a3b8;font-size:0.82rem;'>Volatility: <b style='color:#f59e0b;'>{r["vol"]*100:.1f}%</b></div>
                     <div style='color:#94a3b8;font-size:0.82rem;'>RSI: <b style='color:#a78bfa;'>{rep["rsi"]:.0f}</b></div>
                     <div style='color:#94a3b8;font-size:0.82rem;'>Price Class: <b style='color:#94a3b8;'>{rep["price_class"]}</b></div>
                 </div>
@@ -1616,6 +1682,145 @@ with tab6:
             fig_rp.update_layout(**_chart_layout(f"{r['symbol']} — 1 Year Chart", height=420))
             fig_rp.update_layout(xaxis_rangeslider_visible=False)
             st.plotly_chart(fig_rp, use_container_width=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — MARKET CONTEXT (20 INDICATORS)
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab8:
+    st.markdown("### 📊 Market Context — 20 Indicators")
+    st.markdown('<div style="color:#334155;font-size:0.82rem;margin-bottom:16px;">Real-time composite of 10 Indian + 10 Global indicators. Drives position sizing and signal filtering across all tabs.</div>', unsafe_allow_html=True)
+
+    mc_col1, mc_col2 = st.columns([1, 5])
+    with mc_col1:
+        mc_refresh_btn = st.button("🔄 Refresh", type="primary", use_container_width=True, key="mc_refresh")
+    with mc_col2:
+        st.markdown('<div style="color:#334155;font-size:0.75rem;padding-top:10px;">Auto-cached 15 min · Used by Live Scan to scale position sizes and filter signals</div>', unsafe_allow_html=True)
+
+    with st.spinner("Loading 20 market indicators…"):
+        ctx = get_market_context(force_refresh=mc_refresh_btn)
+
+    bias = ctx["market_bias_score"]
+    label = ctx["market_bias_label"]
+    psm = ctx["position_size_mult"]
+    bias_color = "#10b981" if bias >= 0.58 else ("#ef4444" if bias <= 0.42 else "#f59e0b")
+
+    # ── Top summary strip ─────────────────────────────────────────────────────
+    mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
+    mc1.markdown(f"""
+    <div class="stat-card" style="text-align:center;">
+        <div style="font-size:0.65rem;color:#475569;text-transform:uppercase;font-weight:700;">Market Bias</div>
+        <div style="font-size:1.4rem;font-weight:900;color:{bias_color};">{label}</div>
+        <div style="font-size:0.75rem;color:#94a3b8;">{bias:.0%} score</div>
+    </div>""", unsafe_allow_html=True)
+    mc2.metric("Position Size", f"{psm:.0%}", "of capital")
+    mc3.metric("India Score", f"{ctx['indian_score']:.0%}")
+    mc4.metric("Global Score", f"{ctx['global_score']:.0%}")
+    mc5.metric("Intraday Safe", "✅ Yes" if ctx["intraday_filter"] else "⚠️ Caution")
+    mc6.metric("Swing Safe", "✅ Yes" if ctx["swing_filter"] else "⚠️ Caution")
+
+    # Bias bar
+    bar_pct = int(bias * 100)
+    bar_color = "#10b981" if bias >= 0.58 else ("#ef4444" if bias <= 0.42 else "#f59e0b")
+    st.markdown(f"""
+    <div style="margin:12px 0 4px;font-size:0.72rem;color:#475569;font-weight:700;">COMPOSITE MARKET BIAS</div>
+    <div style="background:#0f2040;border-radius:8px;height:14px;overflow:hidden;position:relative;">
+        <div style="background:{bar_color};width:{bar_pct}%;height:100%;border-radius:8px;transition:width 0.5s;"></div>
+        <div style="position:absolute;top:0;left:50%;width:2px;height:100%;background:#334155;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:0.65rem;color:#334155;margin-top:2px;">
+        <span>STRONG BEAR</span><span>NEUTRAL</span><span>STRONG BULL</span>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown(f'<div style="color:#334155;font-size:0.68rem;margin-top:4px;">Last updated: {ctx["fetched_at"]}</div>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    # ── Strategy rules based on current context ───────────────────────────────
+    st.markdown("### 🧠 Strategy Rules (Auto-Generated)")
+    rules = []
+    if bias >= 0.65:
+        rules += ["✅ Strong bull market — full position sizing allowed",
+                  "✅ Aggressive longs on breakouts with volume",
+                  "✅ Sector leaders: follow FII inflows"]
+    elif bias >= 0.55:
+        rules += ["✅ Moderate bull — 85% position sizing",
+                  "✅ Trade with trend, avoid counter-trend",
+                  "⚠️ Watch for sector rotation signals"]
+    elif bias >= 0.45:
+        rules += ["⚠️ Neutral market — 65% position sizing",
+                  "⚠️ Trade only high-conviction setups",
+                  "⚠️ Tighten stop-losses, reduce targets"]
+    elif bias >= 0.35:
+        rules += ["🔴 Bearish bias — 40% position sizing",
+                  "🔴 Avoid aggressive longs",
+                  "🔴 Focus on defensive sectors (FMCG, Pharma)"]
+    else:
+        rules += ["🔴 Strong bear — 25% position sizing only",
+                  "🔴 Cash is a position — wait for reversal",
+                  "🔴 High VIX: avoid intraday scalping"]
+
+    # Add VIX-specific rule
+    vix_ind = next((i for i in ctx["indicators"] if i["key"] == "india_vix"), None)
+    if vix_ind and vix_ind["score"] < 0.40:
+        rules.append("⚠️ India VIX elevated — reduce intraday exposure, widen stops")
+
+    for rule in rules:
+        st.markdown(f'<div style="padding:6px 12px;margin:3px 0;background:#0a1628;border-left:3px solid {bias_color};border-radius:0 6px 6px 0;font-size:0.82rem;color:#e2e8f0;">{rule}</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Indian indicators ─────────────────────────────────────────────────────
+    st.markdown("### 🇮🇳 Indian Market Indicators")
+    indian_inds = [i for i in ctx["indicators"] if "Indian" in i["category"]]
+    _render_indicator_grid(indian_inds)
+
+    st.markdown("---")
+
+    # ── Global indicators ─────────────────────────────────────────────────────
+    st.markdown("### 🌍 Global Market Indicators")
+    global_inds = [i for i in ctx["indicators"] if "Global" in i["category"]]
+    _render_indicator_grid(global_inds)
+
+    st.markdown("---")
+
+    # ── Full indicator table ──────────────────────────────────────────────────
+    st.markdown("### 📋 Full Indicator Table")
+    ind_tbl = pd.DataFrame([{
+        "Indicator": i["name"],
+        "Category": i["category"],
+        "Score": f"{i['score']:.0%}",
+        "Signal": i["signal"],
+        "Trend": i["trend"],
+        "Impact": i["impact"],
+        "Weight": f"{i['weight']:.0%}",
+        "Note": i["note"],
+    } for i in ctx["indicators"]])
+    st.dataframe(ind_tbl, use_container_width=True, hide_index=True)
+
+    # ── Pro trader rules reference ────────────────────────────────────────────
+    st.markdown("---")
+    with st.expander("📖 Pro Trader Rules Reference"):
+        st.markdown("""
+**INTRADAY STRATEGY:**
+- Nifty trend + VWAP + Volume spike → confirm with Bank Nifty + VIX
+- Trade only when 3+ indicators align
+
+**SWING STRATEGY:**
+- Sector rotation + Relative strength + FII inflow support
+- Global filter: check S&P 500, Crude Oil, DXY first
+
+**POSITION SIZING RULES:**
+- Strong Bull (>65%): Full capital
+- Bull (55-65%): 85% capital
+- Neutral (45-55%): 65% capital
+- Bear (35-45%): 40% capital
+- Strong Bear (<35%): 25% capital — cash is a position
+
+**NEVER:**
+- Trade against India VIX > 25
+- Ignore FII selling pressure
+- Use full position in high VIX environment
+        """)
+
 
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("---")
