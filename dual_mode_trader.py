@@ -9,9 +9,14 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from datetime import datetime, date, timedelta, time as dtime
+from datetime import datetime, date, timedelta, time as dtime, timezone
 import sys, os, time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ── IST = UTC + 5:30 ──────────────────────────────────────────────────────────
+_IST = timezone(timedelta(hours=5, minutes=30))
+def _now_ist() -> datetime:
+    return datetime.now(timezone.utc).astimezone(_IST).replace(tzinfo=None)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -78,7 +83,7 @@ hr{border-color:#0f2040!important;margin:.8rem 0!important;}
 ALL_SYMBOLS_CLEAN = sorted(set(s.replace(".NS", "") for s in INTRADAY_STOCKS))
 
 def market_open() -> bool:
-    now = datetime.now()
+    now = _now_ist()
     return now.weekday() < 5 and dtime(9, 15) <= now.time() <= dtime(15, 30)
 
 def _layout(title="", height=450):
@@ -121,7 +126,7 @@ with st.sidebar:
     dot = '<span class="live-dot"></span>' if is_open else "🔴 "
     mkt_color = "#10b981" if is_open else "#ef4444"
     st.markdown(f'<div style="color:{mkt_color};font-weight:700;font-size:.82rem;">{dot}{mkt_status}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div style="color:#1e3a5f;font-size:.65rem;">{datetime.now().strftime("%d %b %Y  %I:%M %p")}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="color:#1e3a5f;font-size:.65rem;">{_now_ist().strftime("%d %b %Y  %I:%M %p")} IST</div>', unsafe_allow_html=True)
 
     st.markdown("---")
     # ── Mode selector ─────────────────────────────────────────────────────────
@@ -190,7 +195,7 @@ st.markdown(f"""
 <div style='color:#334155;font-size:.78rem;'>
     Capital: <b style='color:#3b82f6;'>₹{capital:,.0f}</b> &nbsp;·&nbsp;
     Risk/Trade: <b style='color:#f59e0b;'>{risk_pct*100:.1f}%</b> &nbsp;·&nbsp;
-    {datetime.now().strftime("%d %b %Y %I:%M %p")}
+    {_now_ist().strftime("%d %b %Y %I:%M %p")} IST
 </div>
 """, unsafe_allow_html=True)
 st.markdown("---")
@@ -413,12 +418,12 @@ if "Intraday" in mode:
     # ── Sector themes tab ─────────────────────────────────────────────────────
     with tab_sector:
         st.markdown("### 🌍 Active Geopolitical & Macro Themes")
-        month = datetime.now().month
+        month = _now_ist().month
         seasonal = SEASONAL_BIAS.get(month, {"bias": 0, "note": ""})
         bias_color = "#10b981" if seasonal["bias"] > 0 else "#ef4444"
         st.markdown(f"""
         <div style='background:#0a1628;border:1px solid #0f2040;border-radius:12px;padding:14px;margin-bottom:16px;'>
-            <span style='color:#475569;font-size:.72rem;font-weight:700;text-transform:uppercase;'>📅 Seasonal Bias — {datetime.now().strftime("%B")}</span>
+            <span style='color:#475569;font-size:.72rem;font-weight:700;text-transform:uppercase;'>📅 Seasonal Bias — {_now_ist().strftime("%B")}</span>
             <div style='color:{bias_color};font-weight:700;font-size:1rem;margin-top:4px;'>{seasonal["bias"]*100:+.0f}% monthly bias</div>
             <div style='color:#64748b;font-size:.78rem;margin-top:2px;'>{seasonal["note"]}</div>
         </div>""", unsafe_allow_html=True)
@@ -881,5 +886,5 @@ st.markdown(f"""
 <div style='display:flex;justify-content:space-between;align-items:center;color:#1e3a5f;font-size:.65rem;flex-wrap:wrap;gap:6px;'>
     <span>⚡ QuantSignal India v6.0 — Dual Mode &nbsp;|&nbsp; {len(INTRADAY_STOCKS)} stocks &nbsp;|&nbsp; 14 sectors</span>
     <span>Data: Yahoo Finance (15-min delayed) &nbsp;|&nbsp; Not financial advice &nbsp;|&nbsp; Always use stop-loss</span>
-    <span>{datetime.now().strftime("%d %b %Y %I:%M %p")}</span>
+    <span>{_now_ist().strftime("%d %b %Y %I:%M %p")} IST</span>
 </div>""", unsafe_allow_html=True)

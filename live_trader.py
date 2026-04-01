@@ -9,8 +9,15 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date, time as dtime, timedelta
+from datetime import datetime, date, time as dtime, timedelta, timezone
 import sys, os, time as _time
+
+# ── IST = UTC + 5:30 — hardcoded offset, works on every server/cloud ─────────
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+def _now_ist() -> datetime:
+    """Return current datetime in IST (UTC+5:30). No pytz/zoneinfo needed."""
+    return datetime.now(timezone.utc).astimezone(_IST).replace(tzinfo=None)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backend.engines.intraday_engine import IntradayEngine, get_market_status
@@ -168,13 +175,13 @@ for _sec, _syms in SECTOR_GROUPS.items():
 ALL_SYMBOLS_CLEAN = sorted(set(s.replace(".NS", "") for s in INTRADAY_STOCKS))
 
 def market_open() -> bool:
-    now = datetime.now()
+    now = _now_ist()
     if now.weekday() >= 5:
         return False
     return dtime(9, 15) <= now.time() <= dtime(15, 30)
 
 def time_to_close() -> str:
-    now = datetime.now()
+    now = _now_ist()
     close = now.replace(hour=15, minute=30, second=0, microsecond=0)
     if now >= close:
         return "Closed"
@@ -296,7 +303,7 @@ with st.sidebar:
     st.markdown(f'<div style="color:{mkt_color};font-weight:700;font-size:0.85rem;">{dot}{mkt}</div>', unsafe_allow_html=True)
     if is_open:
         st.markdown(f'<div style="color:#475569;font-size:0.72rem;">⏱ {time_to_close()}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div style="color:#1e3a5f;font-size:0.68rem;margin-top:2px;">{datetime.now().strftime("%d %b %Y  %I:%M %p")}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="color:#1e3a5f;font-size:0.68rem;margin-top:2px;">{_now_ist().strftime("%d %b %Y  %I:%M %p")} IST</div>', unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown('<div style="color:#475569;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">💰 Capital & Risk</div>', unsafe_allow_html=True)
@@ -312,9 +319,36 @@ with st.sidebar:
     penny_only = st.checkbox("🪙 Penny Stocks Only (≤₹50)", value=False)
 
     st.markdown("---")
-    st.markdown('<div style="color:#475569;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">📅 Date Range</div>', unsafe_allow_html=True)
-    date_from = st.date_input("From", value=date.today() - timedelta(days=30))
-    date_to = st.date_input("To", value=date.today())
+    st.markdown('<div style="color:#475569;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">📅 Intraday Date</div>', unsafe_allow_html=True)
+
+    _today_ist = _now_ist().date()
+    # Next 7 weekdays (Mon–Fri) starting from today
+    _weekdays = []
+    _d = _today_ist
+    while len(_weekdays) < 7:
+        if _d.weekday() < 5:
+            _weekdays.append(_d)
+        _d += timedelta(days=1)
+
+    _date_labels = []
+    for _wd in _weekdays:
+        if _wd == _today_ist:
+            _date_labels.append(f"Today ({_wd.strftime('%d %b')})")
+        elif _wd == _today_ist + timedelta(days=1) and _today_ist.weekday() < 4:
+            _date_labels.append(f"Tomorrow ({_wd.strftime('%d %b')})")
+        else:
+            _date_labels.append(_wd.strftime("%a %d %b"))
+
+    _sel_idx = st.selectbox(
+        "Scan Date",
+        options=list(range(len(_weekdays))),
+        format_func=lambda i: _date_labels[i],
+        index=0,
+        key="intra_date_sel",
+    )
+    scan_date = _weekdays[_sel_idx]
+    if scan_date > _today_ist:
+        st.info(f"📅 Pre-market scan for {scan_date.strftime('%d %b %Y')} — uses latest available data as proxy.")
 
     st.markdown("---")
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=False)
@@ -345,7 +379,8 @@ with hcol1:
     <div style='color:#334155;font-size:0.8rem;'>
         <b style='color:#2563eb;'>{len(universe)}</b> stocks scanning •
         <b style='color:#2563eb;'>14 sectors</b> •
-        {datetime.now().strftime("%d %b %Y %I:%M %p")}
+        {_now_ist().strftime("%d %b %Y %I:%M %p")} IST •
+        Scan: <b style='color:#f59e0b;'>{scan_date.strftime("%d %b %Y")}</b>
     </div>""", unsafe_allow_html=True)
 with hcol2:
     scan_btn = st.button("🔍 SCAN NOW", type="primary", use_container_width=True)
@@ -362,17 +397,18 @@ if scan_btn or best_btn:
     st.session_state["trades"] = trades
     st.session_state["buys"] = [t for t in trades if t["signal"] == "BUY"]
     st.session_state["pennies"] = [t for t in trades if t["is_penny"]]
-    st.session_state["scan_time"] = datetime.now().strftime("%I:%M:%S %p")
-    st.session_state["scan_date"] = datetime.now().strftime("%d %b %Y")
+    st.session_state["scan_time"] = _now_ist().strftime("%I:%M:%S %p IST")
+    st.session_state["scan_date"] = scan_date.strftime("%d %b %Y")
 
 # ── MAIN TABS ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📡 Live Signals",
     "🪙 Penny Stocks",
     "🔮 Next-Day Picks",
     "📈 Forecast",
     "🔎 Stock Explorer",
     "📋 Reports",
+    "🔍 Deep Dive",
 ])
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1326,5 +1362,409 @@ st.markdown(f"""
 <div style='display:flex;justify-content:space-between;align-items:center;color:#1e3a5f;font-size:0.68rem;padding:4px 0;flex-wrap:wrap;gap:8px;'>
     <span>⚡ QuantSignal India v5.0 &nbsp;|&nbsp; {len(INTRADAY_STOCKS)} stocks &nbsp;|&nbsp; 14 sectors &nbsp;|&nbsp; 6 tabs</span>
     <span>Data: Yahoo Finance (15-min delayed) &nbsp;|&nbsp; Not financial advice &nbsp;|&nbsp; Always use stop-loss</span>
-    <span>{datetime.now().strftime("%d %b %Y %I:%M %p")}</span>
+    <span>{_now_ist().strftime("%d %b %Y %I:%M %p")} IST</span>
 </div>""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — DEEP DIVE STOCK ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab7:
+    from backend.engines.stock_analysis_engine import load_analysis_bundle, load_peer_data, compute_trade_setup
+
+    st.markdown("""
+    <div style='margin-bottom:16px;'>
+        <span style='font-size:1.4rem;font-weight:900;color:#f1f5f9;'>🔍 Deep Dive — Stock Analysis</span>
+        <div style='color:#334155;font-size:0.8rem;margin-top:4px;'>Full technical + ML + risk + Monte Carlo analysis for any NSE stock</div>
+    </div>""", unsafe_allow_html=True)
+
+    dd_col1, dd_col2, dd_col3 = st.columns([2.5, 1, 1])
+    with dd_col1:
+        dd_symbol = st.selectbox("Select Stock", ALL_SYMBOLS_CLEAN, key="dd_sym",
+                                  index=ALL_SYMBOLS_CLEAN.index("RELIANCE") if "RELIANCE" in ALL_SYMBOLS_CLEAN else 0)
+    with dd_col2:
+        dd_capital = st.number_input("Capital (₹)", value=capital, min_value=1000, step=1000, key="dd_cap")
+    with dd_col3:
+        dd_risk = st.slider("Risk %", 0.5, 5.0, 2.0, 0.5, key="dd_risk") / 100
+
+    analyse_btn = st.button("🔍 ANALYSE", type="primary", use_container_width=False, key="dd_btn")
+
+    if analyse_btn:
+        cache_key = f"sap_{dd_symbol}"
+        with st.spinner(f"Loading full analysis for {dd_symbol}..."):
+            try:
+                bundle = load_analysis_bundle(dd_symbol, dd_capital, dd_risk)
+                st.session_state[cache_key] = bundle
+            except Exception as e:
+                st.error(f"Could not load data for {dd_symbol}: {e}")
+                bundle = None
+    else:
+        bundle = st.session_state.get(f"sap_{dd_symbol}")
+
+    if bundle:
+        price = bundle.current_price
+        chg = bundle.price_change_1d
+        chg_color = "#10b981" if chg >= 0 else "#ef4444"
+        chg_arrow = "▲" if chg >= 0 else "▼"
+        cap_class = bundle.metadata_report.get("price_class", "MID")
+        risk_lvl = bundle.metadata_report.get("risk_level", "🟡 MEDIUM")
+        sector = bundle.sector
+
+        # ── SECTION 1: PRICE OVERVIEW ─────────────────────────────────────────
+        st.markdown("---")
+        ov1, ov2, ov3, ov4, ov5 = st.columns(5)
+        ov1.metric("Current Price", f"₹{price:,.2f}", f"{chg_arrow} {chg:+.2f}%")
+        ov2.metric("52W High", f"₹{bundle.price_52w_high:,.2f}")
+        ov3.metric("52W Low", f"₹{bundle.price_52w_low:,.2f}")
+        ov4.metric("Cap Class", cap_class)
+        ov5.metric("Risk Level", risk_lvl.split()[-1] if risk_lvl else "—")
+
+        st.markdown(f"""
+        <div style='margin:8px 0 16px;'>
+            <span class="badge-sector">{sector}</span>
+            <span style='background:rgba(16,185,129,0.1);color:#6ee7b7;padding:3px 10px;border-radius:6px;font-size:0.72rem;border:1px solid rgba(16,185,129,0.2);margin-right:4px;'>{cap_class}</span>
+            <span style='color:{chg_color};font-weight:700;font-size:0.85rem;'>{chg_arrow} {chg:+.2f}% today</span>
+        </div>""", unsafe_allow_html=True)
+
+        # ── SECTION 2: TECHNICAL CHART ────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 📊 Technical Chart")
+        tf_choice = st.radio("Timeframe", ["Daily", "Intraday 5m"], horizontal=True, key="dd_tf")
+
+        df_chart = bundle.df_intra if tf_choice == "Intraday 5m" and not bundle.df_intra.empty else bundle.df_daily
+        df_feat = bundle.df_features if tf_choice == "Daily" else bundle.df_intra
+
+        if not df_chart.empty:
+            dc = df_chart.tail(252 if tf_choice == "Daily" else 120)
+            fig = make_subplots(rows=4, cols=1, row_heights=[0.55, 0.15, 0.15, 0.15],
+                                shared_xaxes=True, vertical_spacing=0.02)
+            fig.add_trace(go.Candlestick(
+                x=dc.index, open=dc["Open"], high=dc["High"], low=dc["Low"], close=dc["Close"],
+                name="Price", increasing=dict(line=dict(color="#10b981"), fillcolor="#10b981"),
+                decreasing=dict(line=dict(color="#ef4444"), fillcolor="#ef4444"),
+            ), row=1, col=1)
+            overlays = [("EMA9","#6366f1","solid"),("EMA21","#ec4899","solid"),
+                        ("VWAP","#f59e0b","dot"),("BB_Upper","#475569","dash"),("BB_Lower","#475569","dash")]
+            for col_name, color, dash in overlays:
+                if col_name in dc.columns:
+                    fig.add_trace(go.Scatter(x=dc.index, y=dc[col_name], mode="lines",
+                        line=dict(color=color, width=1, dash=dash), name=col_name, showlegend=True), row=1, col=1)
+            ts = bundle.trade_setup
+            fig.add_hline(y=ts.entry, line_color="#6366f1", line_width=1.5, annotation_text="ENTRY", row=1, col=1)
+            fig.add_hline(y=ts.target_1, line_color="#10b981", line_dash="dash", annotation_text="T1", row=1, col=1)
+            fig.add_hline(y=ts.stop_loss, line_color="#ef4444", line_dash="dash", annotation_text="SL", row=1, col=1)
+            if "RSI" in dc.columns:
+                fig.add_trace(go.Scatter(x=dc.index, y=dc["RSI"], mode="lines",
+                    line=dict(color="#a78bfa", width=1.5), name="RSI"), row=2, col=1)
+                fig.add_hline(y=70, line_color="#ef4444", line_dash="dot", line_width=0.8, row=2, col=1)
+                fig.add_hline(y=30, line_color="#10b981", line_dash="dot", line_width=0.8, row=2, col=1)
+            macd_col = "MACD_Hist" if "MACD_Hist" in dc.columns else None
+            if macd_col:
+                hist = dc[macd_col]
+                fig.add_trace(go.Bar(x=dc.index, y=hist,
+                    marker_color=["#10b981" if v >= 0 else "#ef4444" for v in hist],
+                    name="MACD Hist"), row=3, col=1)
+            vcols = ["#10b981" if c >= o else "#ef4444" for c, o in zip(dc["Close"], dc["Open"])]
+            fig.add_trace(go.Bar(x=dc.index, y=dc["Volume"], marker_color=vcols, name="Volume", opacity=0.8), row=4, col=1)
+            layout = _chart_layout(height=620)
+            layout["xaxis_rangeslider_visible"] = False
+            fig.update_layout(**layout)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # ── SECTION 3: MULTI-TIMEFRAME SIGNALS ───────────────────────────────
+        st.markdown("---")
+        st.markdown("### ⏱ Multi-Timeframe Signals")
+        tf_cols = st.columns(3)
+        timeframes = [
+            ("5m Intraday", bundle.intra_score.get("score", 0.5), bundle.intra_score.get("rsi", 50), bundle.intra_score.get("supertrend", "—"), bundle.intra_score.get("reasons", [])),
+        ]
+        # 1d signal from multi-analyzer
+        ma_score_1d = bundle.ma_result.get("combined_score", 0.5)
+        ma_signal_1d = bundle.ma_result.get("signal", "NEUTRAL")
+        ma_reasons_1d = bundle.ma_result.get("reasoning", [])
+        feat_last = bundle.df_features.iloc[-1] if not bundle.df_features.empty else {}
+        rsi_1d = float(feat_last.get("RSI", 50)) if hasattr(feat_last, "get") else 50
+
+        for i, (tf_label, score, rsi_val, st_val, reasons) in enumerate(timeframes):
+            sig = "BUY" if score >= 0.55 else ("SELL" if score < 0.35 else "NEUTRAL")
+            sig_color = "#10b981" if sig == "BUY" else ("#ef4444" if sig == "SELL" else "#f59e0b")
+            with tf_cols[i]:
+                st.markdown(f"""
+                <div class="stat-card" style="text-align:left;">
+                    <div style='color:#475569;font-size:0.65rem;text-transform:uppercase;font-weight:700;'>{tf_label}</div>
+                    <div style='color:{sig_color};font-size:1.3rem;font-weight:900;margin:6px 0;'>{sig}</div>
+                    <div style='color:#94a3b8;font-size:0.75rem;'>Score: <b style='color:#f1f5f9;'>{score:.0%}</b></div>
+                    <div style='color:#94a3b8;font-size:0.75rem;'>RSI: <b style='color:#a78bfa;'>{rsi_val:.0f}</b></div>
+                    <div style='color:#94a3b8;font-size:0.75rem;'>Supertrend: <b style='color:{"#10b981" if st_val=="BUY" else "#ef4444"};'>{st_val}</b></div>
+                    <div style='margin-top:6px;'>{''.join(f"<span class='reason-chip'>{r}</span>" for r in reasons[:3])}</div>
+                </div>""", unsafe_allow_html=True)
+
+        with tf_cols[1]:
+            sig_1d = "BUY" if ma_score_1d >= 0.55 else ("SELL" if ma_score_1d < 0.35 else "NEUTRAL")
+            sig_color_1d = "#10b981" if sig_1d == "BUY" else ("#ef4444" if sig_1d == "SELL" else "#f59e0b")
+            st.markdown(f"""
+            <div class="stat-card" style="text-align:left;">
+                <div style='color:#475569;font-size:0.65rem;text-transform:uppercase;font-weight:700;'>1d Swing</div>
+                <div style='color:{sig_color_1d};font-size:1.3rem;font-weight:900;margin:6px 0;'>{sig_1d}</div>
+                <div style='color:#94a3b8;font-size:0.75rem;'>Score: <b style='color:#f1f5f9;'>{ma_score_1d:.0%}</b></div>
+                <div style='color:#94a3b8;font-size:0.75rem;'>RSI: <b style='color:#a78bfa;'>{rsi_1d:.0f}</b></div>
+                <div style='margin-top:6px;'>{''.join(f"<span class='reason-chip'>{r}</span>" for r in ma_reasons_1d[:3])}</div>
+            </div>""", unsafe_allow_html=True)
+
+        with tf_cols[2]:
+            pred_nd = bundle.pred_next_day
+            nd_dir = pred_nd.get("direction", "NEUTRAL")
+            nd_conf = pred_nd.get("confidence", 0.5)
+            nd_color = "#10b981" if nd_dir == "UP" else ("#ef4444" if nd_dir == "DOWN" else "#f59e0b")
+            st.markdown(f"""
+            <div class="stat-card" style="text-align:left;">
+                <div style='color:#475569;font-size:0.65rem;text-transform:uppercase;font-weight:700;'>ML Next-Day</div>
+                <div style='color:{nd_color};font-size:1.3rem;font-weight:900;margin:6px 0;'>{nd_dir}</div>
+                <div style='color:#94a3b8;font-size:0.75rem;'>Confidence: <b style='color:#f1f5f9;'>{nd_conf:.0%}</b></div>
+                <div style='color:#94a3b8;font-size:0.75rem;'>Predicted: <b style='color:#10b981;'>₹{pred_nd.get("predicted_price", price):,.2f}</b></div>
+                <div style='color:#94a3b8;font-size:0.75rem;'>Return: <b style='color:{nd_color};'>{pred_nd.get("predicted_return", 0):+.2f}%</b></div>
+            </div>""", unsafe_allow_html=True)
+
+        # ── SECTION 4: ML PREDICTIONS ─────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 🔮 ML Predictions")
+        pred_multi = bundle.pred_multi
+        pred_labels = [("Next Day", bundle.pred_next_day), ("10 Days", pred_multi.get("10_days", {})),
+                       ("30 Days", pred_multi.get("30_days", {})), ("3 Months", pred_multi.get("3_months", {}))]
+        pred_cols = st.columns(4)
+        for i, (lbl, p) in enumerate(pred_labels):
+            if not p or "error" in p:
+                pred_cols[i].metric(lbl, "N/A")
+                continue
+            d = p.get("direction", "NEUTRAL")
+            c = p.get("confidence", 0.5)
+            pp = p.get("predicted_price", price)
+            ret = p.get("predicted_return", 0)
+            d_color = "#10b981" if d == "UP" else ("#ef4444" if d == "DOWN" else "#f59e0b")
+            pred_cols[i].markdown(f"""
+            <div class="stat-card">
+                <div style='color:#475569;font-size:0.65rem;text-transform:uppercase;font-weight:700;'>{lbl}</div>
+                <div style='color:{d_color};font-size:1.1rem;font-weight:900;margin:4px 0;'>{"▲" if d=="UP" else "▼" if d=="DOWN" else "→"} {d}</div>
+                <div style='color:#f1f5f9;font-weight:700;'>₹{pp:,.2f}</div>
+                <div style='color:{d_color};font-size:0.78rem;font-weight:700;'>{ret:+.2f}%</div>
+                <div style='color:#475569;font-size:0.7rem;'>Conf: {c:.0%}</div>
+                <div style='color:#334155;font-size:0.68rem;'>₹{p.get("price_low",price):,.0f} – ₹{p.get("price_high",price):,.0f}</div>
+            </div>""", unsafe_allow_html=True)
+
+        conds = bundle.pred_next_day.get("market_conditions", [])
+        if conds:
+            st.markdown('<div style="margin-top:8px;">' + " &nbsp;·&nbsp; ".join(f'<span class="reason-chip">{c}</span>' for c in conds) + '</div>', unsafe_allow_html=True)
+
+        # ── SECTION 5: RISK METRICS ───────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 🛡️ Risk Metrics")
+        rm = bundle.risk_metrics
+        if rm and "error" not in rm:
+            r1, r2, r3, r4, r5, r6, r7 = st.columns(7)
+            sharpe = rm.get("sharpe_ratio", 0)
+            sharpe_color = "#10b981" if sharpe > 1 else ("#f59e0b" if sharpe > 0 else "#ef4444")
+            r1.metric("Sharpe", f"{sharpe:.2f}")
+            r2.metric("Sortino", f"{rm.get('sortino_ratio', 0):.2f}")
+            r3.metric("VaR 95%", f"{rm.get('var_historical', {}).get('var', 0)*100:.2f}%")
+            r4.metric("CVaR 95%", f"{rm.get('cvar', {}).get('cvar', 0)*100:.2f}%")
+            r5.metric("Max DD", f"{rm.get('max_drawdown', {}).get('max_drawdown', 0)*100:.1f}%")
+            r6.metric("Annual Vol", f"{rm.get('volatility_annual', 0)*100:.1f}%")
+            r7.metric("Total Return", f"{rm.get('total_return', 0)*100:.1f}%")
+
+            stress = RiskEngine.stress_test(bundle.df_daily["Close"].pct_change().dropna())
+            if stress:
+                st.markdown("**Stress Test Scenarios**")
+                stress_df = pd.DataFrame(stress)
+                stress_df.columns = ["Scenario", "Shock", "Annualised Impact"]
+                st.dataframe(stress_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Risk metrics unavailable — insufficient data.")
+
+        # ── SECTION 6: MONTE CARLO ────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 🎲 Monte Carlo Simulation (30-day)")
+        mc = bundle.mc_result
+        if mc and "error" not in mc:
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Prob Profit", f"{mc.get('prob_profit', 0):.0%}")
+            mc2.metric("Expected Price", f"₹{mc.get('expected_price', price):,.2f}")
+            mc3.metric("p5 (Worst)", f"₹{mc.get('p5', price):,.2f}")
+            mc4.metric("p95 (Best)", f"₹{mc.get('p95', price):,.2f}")
+
+            paths = mc.get("sample_paths", [])
+            if paths:
+                fig_mc = go.Figure()
+                days_x = list(range(len(paths[0])))
+                for path in paths[:40]:
+                    fig_mc.add_trace(go.Scatter(x=days_x, y=path, mode="lines",
+                        line=dict(color="rgba(99,102,241,0.12)", width=1), showlegend=False))
+                # Percentile bands
+                import numpy as _np
+                paths_arr = _np.array(paths)
+                for pct, color, name in [(5,"#ef4444","p5"),(25,"#f59e0b","p25"),(50,"#10b981","Median"),(75,"#f59e0b","p75"),(95,"#ef4444","p95")]:
+                    band = _np.percentile(paths_arr, pct, axis=0)
+                    fig_mc.add_trace(go.Scatter(x=days_x, y=band, mode="lines",
+                        line=dict(color=color, width=2, dash="dash" if pct in [5,95] else "solid"),
+                        name=name))
+                fig_mc.add_hline(y=price, line_color="#6366f1", line_dash="dot", annotation_text="Current")
+                fig_mc.update_layout(**_chart_layout("Monte Carlo — 30-Day Price Simulation", height=380))
+                st.plotly_chart(fig_mc, use_container_width=True)
+        else:
+            st.info("Monte Carlo unavailable — insufficient data.")
+
+        # ── SECTION 7: MULTI-ANALYZER SCORECARD ──────────────────────────────
+        st.markdown("---")
+        st.markdown("### 🔬 Multi-Analyzer Scorecard")
+        ma = bundle.ma_result
+        if ma and "analyzers" in ma:
+            combined = ma.get("combined_score", 0.5)
+            ma_signal = ma.get("signal", "NEUTRAL")
+            sig_color_ma = "#10b981" if "BUY" in ma_signal else ("#ef4444" if "SELL" in ma_signal else "#f59e0b")
+            st.markdown(f'<div style="margin-bottom:12px;">Combined Score: <b style="color:#f1f5f9;font-size:1.2rem;">{combined:.0%}</b> &nbsp; Signal: <span style="color:{sig_color_ma};font-weight:800;">{ma_signal}</span></div>', unsafe_allow_html=True)
+
+            breakdown = ma["analyzers"]
+            an_cols = st.columns(len(breakdown))
+            for i, (name, data) in enumerate(breakdown.items()):
+                sc = data["score"]
+                sig = data["signal"]
+                sig_icon = "🟢" if sig == "BULLISH" else ("🔴" if sig == "BEARISH" else "🟡")
+                an_cols[i].markdown(f"""
+                <div class="stat-card">
+                    <div style='color:#475569;font-size:0.62rem;text-transform:uppercase;font-weight:700;'>{name}</div>
+                    <div style='color:#f1f5f9;font-size:1.3rem;font-weight:900;'>{sc:.0%}</div>
+                    <div style='font-size:0.8rem;'>{sig_icon} {sig}</div>
+                    <div style='color:#334155;font-size:0.65rem;'>wt {data["weight"]:.0%}</div>
+                </div>""", unsafe_allow_html=True)
+
+            # Radar chart
+            names_r = list(breakdown.keys())
+            scores_r = [breakdown[n]["score"] for n in names_r]
+            fig_radar = go.Figure(go.Scatterpolar(
+                r=scores_r + [scores_r[0]], theta=names_r + [names_r[0]],
+                fill="toself", fillcolor="rgba(99,102,241,0.15)",
+                line=dict(color="#6366f1", width=2), name="Scores",
+            ))
+            fig_radar.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0,1], tickformat=".0%",
+                    gridcolor="#1e3a5f", linecolor="#1e3a5f"),
+                    angularaxis=dict(gridcolor="#1e3a5f"), bgcolor="#080f1e"),
+                template="plotly_dark", paper_bgcolor="#04080f", height=380,
+                margin=dict(t=20, b=20),
+            )
+            st.plotly_chart(fig_radar, use_container_width=True)
+
+            reasons_ma = ma.get("reasoning", [])
+            if reasons_ma:
+                st.markdown("**Signal Reasoning**")
+                for r in reasons_ma:
+                    icon = "✅" if any(w in r.lower() for w in ["bullish","rising","positive","strong","above","low vix"]) else "⚠️"
+                    st.markdown(f"{icon} {r}")
+
+        # ── SECTION 8: GLOBAL FACTOR IMPACT ──────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 🌍 Global Factor Impact")
+        gf = bundle.metadata_report.get("global_factors", {})
+        theme = gf.get("theme", "NEUTRAL")
+        theme_color = "#10b981" if "STRONG" in theme else ("#f59e0b" if "MODERATE" in theme else "#94a3b8")
+        st.markdown(f'<div style="margin-bottom:10px;">Theme: <span style="color:{theme_color};font-weight:800;">{theme}</span></div>', unsafe_allow_html=True)
+        gf_col1, gf_col2 = st.columns(2)
+        with gf_col1:
+            st.markdown("**Positive Factors**")
+            for f in gf.get("positive", []):
+                st.markdown(f'<span class="factor-pos">✅ {f}</span>', unsafe_allow_html=True)
+        with gf_col2:
+            st.markdown("**Risk Factors**")
+            for f in gf.get("negative", []):
+                st.markdown(f'<span class="factor-neg">⚠️ {f}</span>', unsafe_allow_html=True)
+
+        # ── SECTION 9: TRADE SETUP GENERATOR ─────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 💼 Trade Setup Generator")
+        ts = bundle.trade_setup
+        sig_color_ts = "#10b981" if ts.signal == "BUY" else ("#ef4444" if ts.signal == "AVOID" else "#f59e0b")
+
+        ts_c1, ts_c2, ts_c3, ts_c4 = st.columns(4)
+        ts_c1.metric("Entry", f"₹{ts.entry:,.2f}")
+        ts_c2.metric("Target 1", f"₹{ts.target_1:,.2f}", f"+₹{ts.max_profit:,.0f}")
+        ts_c3.metric("Stop Loss", f"₹{ts.stop_loss:,.2f}", f"-₹{ts.max_loss:,.0f}", delta_color="inverse")
+        ts_c4.metric("R:R Ratio", f"{ts.risk_reward}x")
+
+        ts_c5, ts_c6, ts_c7, ts_c8 = st.columns(4)
+        ts_c5.metric("Qty", ts.qty)
+        ts_c6.metric("Invested", f"₹{ts.invested:,.0f}")
+        ts_c7.metric("ATR", f"₹{ts.atr:,.2f}")
+        ts_c8.metric("Signal", ts.signal)
+
+        st.markdown(f"""
+        <div class="trade-card" style="margin-top:12px;">
+            <div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap;'>
+                <span style='font-size:1.1rem;font-weight:900;color:#f1f5f9;'>{dd_symbol}</span>
+                <span class="badge-sector">{sector}</span>
+                <span style='color:{sig_color_ts};font-weight:800;font-size:1rem;'>{ts.signal}</span>
+                <span style='color:#475569;font-size:0.78rem;'>Confidence: <b style='color:#f1f5f9;'>{ts.confidence:.0%}</b></span>
+            </div>
+            <div style='margin-top:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;'>
+                <div><div style='color:#475569;font-size:0.65rem;text-transform:uppercase;'>Entry</div><div style='color:#f1f5f9;font-weight:700;'>₹{ts.entry:,.2f}</div></div>
+                <div><div style='color:#475569;font-size:0.65rem;text-transform:uppercase;'>Target 1</div><div style='color:#10b981;font-weight:700;'>₹{ts.target_1:,.2f}</div></div>
+                <div><div style='color:#475569;font-size:0.65rem;text-transform:uppercase;'>Target 2</div><div style='color:#06b6d4;font-weight:700;'>₹{ts.target_2:,.2f}</div></div>
+                <div><div style='color:#475569;font-size:0.65rem;text-transform:uppercase;'>Stop Loss</div><div style='color:#ef4444;font-weight:700;'>₹{ts.stop_loss:,.2f}</div></div>
+            </div>
+            <div style='margin-top:8px;color:#334155;font-size:0.75rem;'>
+                Qty: <b style='color:#3b82f6;'>{ts.qty}</b> &nbsp;·&nbsp;
+                Invested: <b style='color:#3b82f6;'>₹{ts.invested:,.0f}</b> &nbsp;·&nbsp;
+                Max Profit: <b style='color:#10b981;'>+₹{ts.max_profit:,.0f}</b> &nbsp;·&nbsp;
+                Max Loss: <b style='color:#ef4444;'>-₹{ts.max_loss:,.0f}</b>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        # ── SECTION 10: PEER COMPARISON ───────────────────────────────────────
+        st.markdown("---")
+        with st.expander("📊 Peer Comparison (click to expand)", expanded=False):
+            with st.spinner("Loading peer data..."):
+                try:
+                    peers = load_peer_data(dd_symbol, sector)
+                    if peers:
+                        # Normalised price chart
+                        fig_peer = go.Figure()
+                        colors_p = ["#6366f1","#10b981","#f59e0b","#06b6d4","#ec4899"]
+                        for i, p in enumerate(peers):
+                            df_p = p.get("df", pd.DataFrame())
+                            if not df_p.empty:
+                                norm = (df_p["Close"] / df_p["Close"].iloc[0]) * 100
+                                lw = 2.5 if p["is_target"] else 1.5
+                                fig_peer.add_trace(go.Scatter(
+                                    x=df_p.index, y=norm, mode="lines",
+                                    line=dict(color=colors_p[i % len(colors_p)], width=lw),
+                                    name=f"★ {p['symbol']}" if p["is_target"] else p["symbol"],
+                                ))
+                        fig_peer.add_hline(y=100, line_color="#475569", line_dash="dot")
+                        fig_peer.update_layout(**_chart_layout("Normalised 6-Month Performance (Base=100)", height=350))
+                        st.plotly_chart(fig_peer, use_container_width=True)
+
+                        # Metrics table
+                        peer_tbl = pd.DataFrame([{
+                            "Stock": ("★ " if p["is_target"] else "") + p["symbol"],
+                            "Price": f"₹{p['price']:,.2f}",
+                            "1M %": f"{p['return_1m']:+.1f}%",
+                            "3M %": f"{p['return_3m']:+.1f}%",
+                            "6M %": f"{p['return_6m']:+.1f}%",
+                            "RSI": p["rsi"],
+                            "Vol %": f"{p['volatility']:.1f}%",
+                            "Sharpe": p["sharpe"],
+                        } for p in peers])
+                        st.dataframe(peer_tbl, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No peer data available for this sector.")
+                except Exception as e:
+                    st.warning(f"Peer comparison unavailable: {e}")
+
+    else:
+        st.markdown("""
+        <div style='text-align:center;padding:60px 20px;'>
+            <div style='font-size:3rem;margin-bottom:12px;'>🔍</div>
+            <div style='font-size:1.4rem;font-weight:900;color:#f1f5f9;margin-bottom:8px;'>Stock Deep Dive</div>
+            <div style='color:#334155;font-size:0.9rem;'>Select a stock above and click <b style='color:#3b82f6;'>ANALYSE</b> to see the full breakdown</div>
+            <div style='color:#1e3a5f;font-size:0.78rem;margin-top:12px;'>
+                Technical Chart · ML Predictions · Risk Metrics · Monte Carlo · Multi-Analyzer · Trade Setup · Peer Comparison
+            </div>
+        </div>""", unsafe_allow_html=True)
