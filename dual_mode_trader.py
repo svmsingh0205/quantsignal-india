@@ -440,3 +440,168 @@ if "Intraday" in mode:
         if auto_refresh and "intra_result" in st.session_state:
             _time.sleep(300)
             st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ██████████████████  DELIVERY MODE  ██████████████████████████████████████████
+# ══════════════════════════════════════════════════════════════════════════════
+else:
+    tab_picks, tab_detail, tab_seasonal, tab_compare = st.tabs([
+        "📦 Top Picks", "🔍 Stock Deep Dive", "📅 Seasonal & Macro", "📊 Compare Horizons"
+    ])
+
+    with tab_picks:
+        st.markdown(f"""
+        <div class="delivery-header">
+            <div style='font-size:1.1rem;font-weight:900;color:#6ee7b7;'>📦 Delivery / Swing Scanner</div>
+            <div style='color:#065f46;font-size:.82rem;margin-top:4px;'>
+                Holding period: <b style='color:#34d399;'>{holding_choice}</b> ({holding_days} trading days) ·
+                Capital: <b style='color:#34d399;'>₹{capital:,.0f}</b> ·
+                Risk/trade: <b style='color:#34d399;'>{risk_pct*100:.1f}%</b>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        col_d1, col_d2 = st.columns([3, 1])
+        with col_d1:
+            scan_delivery_btn = st.button(
+                f"🔍 Find Top {delivery_top_n} Delivery Picks ({holding_choice})",
+                type="primary", use_container_width=True,
+            )
+        with col_d2:
+            clear_d_btn = st.button("🗑️ Clear Results", use_container_width=True, key="clear_d")
+
+        if clear_d_btn:
+            st.session_state.pop("delivery_result", None)
+            st.rerun()
+
+        if scan_delivery_btn:
+            symbols_d = None
+            if delivery_stock_filter:
+                symbols_d = delivery_stock_filter
+            elif delivery_sector_filter:
+                symbols_d = None
+
+            engine_d = DeliveryEngine(capital=capital, risk_pct=risk_pct)
+            prog_d = st.progress(0, text=f"🔍 Scanning for {holding_choice} delivery picks...")
+
+            import threading as _threading
+            result_d = {}
+
+            def _run_delivery():
+                result_d["data"] = engine_d.scan(
+                    holding_days=holding_days,
+                    top_n=delivery_top_n,
+                    sector_filter=delivery_sector_filter if delivery_sector_filter else None,
+                    symbols=symbols_d,
+                )
+
+            td = _threading.Thread(target=_run_delivery)
+            td.start()
+            step_d = 0
+            while td.is_alive():
+                step_d = min(step_d + 2, 95)
+                prog_d.progress(step_d, text=f"📊 Running ML + risk analysis...")
+                _time.sleep(0.4)
+            td.join()
+            prog_d.progress(100, text="✅ Done!")
+            _time.sleep(0.3)
+            prog_d.empty()
+            st.session_state["delivery_result"] = result_d.get("data", [])
+
+        if "delivery_result" in st.session_state:
+            picks = st.session_state["delivery_result"]
+            if not picks:
+                st.warning("No strong delivery signals found. Try a different holding period or sector.")
+            else:
+                dm1, dm2, dm3, dm4, dm5 = st.columns(5)
+                dm1.metric("Picks Found", len(picks))
+                dm2.metric("Best Score", f"{picks[0]['composite_score']:.0%}", picks[0]["symbol"])
+                dm3.metric("Best Return", f"{picks[0]['predicted_return']:+.1f}%")
+                dm4.metric("Best R:R", f"{picks[0]['risk_reward']}x")
+                dm5.metric("Sectors", len(set(p["sector"] for p in picks)))
+                st.markdown("---")
+
+                st.markdown(f"### 📦 Top {len(picks)} Delivery Picks — {holding_choice}")
+                for i, p in enumerate(picks):
+                    ret_color = "#10b981" if p["predicted_return"] > 0 else "#ef4444"
+                    sig_color = "#10b981" if "BUY" in p["signal"] else "#f59e0b"
+                    seasonal_color = "#10b981" if p["seasonal_bias"] > 0 else "#ef4444"
+                    st.markdown(f"""
+                    <div class="trade-card">
+                        <div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;'>
+                            <span class="rank-badge">#{i+1}</span>
+                            <span style='font-size:1.15rem;font-weight:900;color:#f1f5f9;'>{p["symbol"]}</span>
+                            <span class="badge-sector">{p["sector"]}</span>
+                            <span style='background:{sig_color}22;color:{sig_color};padding:3px 12px;border-radius:7px;font-weight:800;font-size:.85rem;'>{p["signal"]}</span>
+                            <span style='color:{ret_color};font-weight:700;font-size:.9rem;'>{p["predicted_return"]:+.1f}% in {holding_days}d</span>
+                        </div>
+                        <div style='display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:10px;'>
+                            <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Entry</div><div style='color:#f1f5f9;font-weight:700;'>₹{p["entry"]:,.2f}</div></div>
+                            <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Target</div><div style='color:#10b981;font-weight:700;'>₹{p["target"]:,.2f}</div></div>
+                            <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Stop Loss</div><div style='color:#ef4444;font-weight:700;'>₹{p["stop_loss"]:,.2f}</div></div>
+                            <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>R:R</div><div style='color:#f59e0b;font-weight:700;'>{p["risk_reward"]}x</div></div>
+                            <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Qty</div><div style='color:#94a3b8;font-weight:700;'>{p["qty"]}</div></div>
+                            <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Invest</div><div style='color:#3b82f6;font-weight:700;'>₹{p["position_value"]:,.0f}</div></div>
+                        </div>
+                        <div style='display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:10px;'>
+                            <div style='color:#64748b;font-size:.72rem;'>Score: {score_bar(p["composite_score"])}</div>
+                            <div style='color:#64748b;font-size:.72rem;'>RSI: <b style='color:#a78bfa;'>{p["rsi"]:.0f}</b></div>
+                            <div style='color:#64748b;font-size:.72rem;'>Sharpe: <b style='color:#06b6d4;'>{p["sharpe"]:.1f}</b></div>
+                            <div style='color:#64748b;font-size:.72rem;'>MaxDD: <b style='color:#f59e0b;'>{p["max_drawdown"]:.0f}%</b></div>
+                            <div style='color:#64748b;font-size:.72rem;'>Seasonal: <b style='color:{seasonal_color};'>{p["seasonal_bias"]:+.0f}%</b></div>
+                        </div>
+                        <div>{''.join(f'<span class="reason-chip">{r}</span>' for r in p["reasons"][:5])}</div>
+                        <div style='margin-top:8px;color:#334155;font-size:.72rem;'>
+                            Price range: <b style='color:#94a3b8;'>₹{p["price_low"]:,.0f} – ₹{p["price_high"]:,.0f}</b> &nbsp;·&nbsp;
+                            Max Profit: <b style='color:#10b981;'>+₹{p["potential_profit"]:,.0f}</b> &nbsp;·&nbsp;
+                            Max Loss: <b style='color:#ef4444;'>-₹{p["potential_loss"]:,.0f}</b> &nbsp;·&nbsp;
+                            Seasonal: <i style='color:#64748b;'>{p["seasonal_note"]}</i>
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+
+                # Summary table
+                st.markdown("---")
+                st.markdown("### 📋 Quick Reference Table")
+                tbl_d = [{
+                    "#": i + 1, "Stock": p["symbol"], "Sector": p["sector"],
+                    "Entry ₹": f"₹{p['entry']:,.2f}", "Target ₹": f"₹{p['target']:,.2f}",
+                    "SL ₹": f"₹{p['stop_loss']:,.2f}", "Score": f"{p['composite_score']:.0%}",
+                    "ML Conf": f"{p['ml_confidence']:.0%}", "Pred Return": f"{p['predicted_return']:+.1f}%",
+                    "R:R": f"{p['risk_reward']}x", "RSI": p["rsi"],
+                    "Sharpe": p["sharpe"], "Signal": p["signal"],
+                } for i, p in enumerate(picks)]
+                st.dataframe(pd.DataFrame(tbl_d), use_container_width=True, hide_index=True,
+                             height=min(450, 55 + 38 * len(tbl_d)))
+
+                # Scatter: score vs predicted return
+                fig_sc = go.Figure(go.Scatter(
+                    x=[p["predicted_return"] for p in picks],
+                    y=[p["composite_score"] for p in picks],
+                    mode="markers+text",
+                    text=[p["symbol"] for p in picks],
+                    textposition="top center",
+                    marker=dict(
+                        size=[max(10, p["composite_score"] * 28) for p in picks],
+                        color=[p["predicted_return"] for p in picks],
+                        colorscale=[[0, "#dc2626"], [0.5, "#f59e0b"], [1, "#10b981"]],
+                        showscale=True,
+                        colorbar=dict(title="Return %", tickfont=dict(color="#94a3b8")),
+                    ),
+                ))
+                fig_sc.add_vline(x=0, line_color="#334155", line_dash="dash")
+                fig_sc.update_layout(**_layout(f"Delivery Picks — Score vs Predicted Return ({holding_choice})", height=400))
+                fig_sc.update_layout(xaxis_title="Predicted Return (%)", yaxis_title="Composite Score")
+                st.plotly_chart(fig_sc, use_container_width=True)
+        else:
+            st.markdown(f"""
+            <div style='text-align:center;padding:50px 20px;'>
+                <div style='font-size:3rem;margin-bottom:12px;'>📦</div>
+                <div style='font-size:1.5rem;font-weight:900;color:#f1f5f9;margin-bottom:8px;'>Delivery / Swing Scanner</div>
+                <div style='color:#334155;font-size:.9rem;margin-bottom:16px;'>
+                    Click <b style='color:#10b981;'>Find Top {delivery_top_n} Delivery Picks</b> to get
+                    <b style='color:#34d399;'>{holding_choice}</b> swing trade candidates
+                </div>
+                <div style='color:#1e3a5f;font-size:.78rem;'>
+                    Uses: ML ensemble · Technical analysis · Seasonal trends · Geopolitical themes · Risk metrics
+                </div>
+            </div>""", unsafe_allow_html=True)
