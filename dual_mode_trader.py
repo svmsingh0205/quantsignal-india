@@ -734,3 +734,152 @@ else:
                 st.markdown("### ⚠️ Risk Factors")
                 for f in r["factors"]["negative"]:
                     st.markdown(f'<span class="factor-neg">⚠️ {f}</span>', unsafe_allow_html=True)
+
+    # ── Seasonal & Macro tab ──────────────────────────────────────────────────
+    with tab_seasonal:
+        st.markdown("### 📅 Seasonal Trends & Macro Calendar")
+
+        # Monthly bias chart
+        months = list(SEASONAL_BIAS.keys())
+        biases = [SEASONAL_BIAS[m]["bias"] * 100 for m in months]
+        month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        colors_s = ["#10b981" if b > 0 else "#ef4444" for b in biases]
+        fig_seas = go.Figure(go.Bar(
+            x=month_names, y=biases,
+            marker_color=colors_s,
+            text=[f"{b:+.0f}%" for b in biases], textposition="outside",
+        ))
+        fig_seas.add_hline(y=0, line_color="#334155", line_dash="dash")
+        fig_seas.update_layout(**_layout("NSE Historical Monthly Seasonal Bias (%)", height=320))
+        fig_seas.update_layout(yaxis_title="Avg Monthly Bias (%)")
+        st.plotly_chart(fig_seas, use_container_width=True)
+
+        # Monthly notes
+        st.markdown("### 📋 Monthly Market Notes")
+        cols_s = st.columns(3)
+        for i, (m, data) in enumerate(SEASONAL_BIAS.items()):
+            bias_c = "#10b981" if data["bias"] > 0 else "#ef4444"
+            cols_s[i % 3].markdown(f"""
+            <div style='background:#0a1628;border:1px solid #0f2040;border-radius:10px;padding:12px;margin-bottom:8px;'>
+                <div style='display:flex;justify-content:space-between;'>
+                    <span style='font-weight:700;color:#e2e8f0;'>{month_names[m-1]}</span>
+                    <span style='color:{bias_c};font-weight:700;'>{data["bias"]*100:+.0f}%</span>
+                </div>
+                <div style='color:#475569;font-size:.72rem;margin-top:4px;'>{data["note"]}</div>
+            </div>""", unsafe_allow_html=True)
+
+        # Geopolitical sector scores
+        st.markdown("---")
+        st.markdown("### 🌍 Geopolitical Theme Scores by Sector")
+        from backend.engines.multi_analyzer import GEOPOLITICAL_THEME_SCORES
+        geo_df = pd.DataFrame([
+            {"Sector": k, "Score": v, "Signal": "BULLISH" if v >= 0.70 else ("NEUTRAL" if v >= 0.55 else "BEARISH")}
+            for k, v in GEOPOLITICAL_THEME_SCORES.items()
+        ]).sort_values("Score", ascending=False)
+        fig_geo = go.Figure(go.Bar(
+            x=geo_df["Score"] * 100, y=geo_df["Sector"], orientation="h",
+            marker=dict(color=geo_df["Score"] * 100,
+                        colorscale=[[0, "#dc2626"], [0.5, "#f59e0b"], [1, "#10b981"]],
+                        cmin=50, cmax=90),
+            text=[f"{s:.0%}" for s in geo_df["Score"]], textposition="outside",
+        ))
+        fig_geo.update_layout(**_layout("Geopolitical Theme Score by Sector", height=380))
+        fig_geo.update_layout(xaxis=dict(range=[0, 100], title="Score (%)"),
+                               yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_geo, use_container_width=True)
+
+    # ── Compare Horizons tab ──────────────────────────────────────────────────
+    with tab_compare:
+        st.markdown("### 📊 Compare Holding Periods for a Stock")
+        cmp_c1, cmp_c2 = st.columns([3, 1])
+        with cmp_c1:
+            cmp_sym = st.selectbox("Select Stock", ALL_SYMBOLS_CLEAN,
+                                    index=ALL_SYMBOLS_CLEAN.index("RELIANCE") if "RELIANCE" in ALL_SYMBOLS_CLEAN else 0,
+                                    key="cmp_sym")
+        with cmp_c2:
+            cmp_btn = st.button("📊 Compare All Horizons", type="primary", use_container_width=True)
+
+        if cmp_btn:
+            with st.spinner(f"Running all horizon predictions for {cmp_sym}..."):
+                df_cmp = DataService.fetch_ohlcv(f"{cmp_sym}.NS", period="2y")
+                if df_cmp.empty:
+                    st.error(f"No data for {cmp_sym}")
+                else:
+                    multi_cmp = PredictionEngine.predict_multi_horizon(df_cmp)
+                    # Also run 60-day
+                    pred_60 = PredictionEngine._train_predict(df_cmp, horizon=60)
+                    if pred_60:
+                        multi_cmp["60_days"] = pred_60
+                    st.session_state["cmp_result"] = {
+                        "symbol": cmp_sym, "multi": multi_cmp,
+                        "price": float(df_cmp["Close"].iloc[-1]),
+                    }
+
+        if "cmp_result" in st.session_state:
+            r = st.session_state["cmp_result"]
+            multi = r["multi"]
+            price_cmp = r["price"]
+            sym_cmp = r["symbol"]
+
+            # Horizon comparison cards
+            horizon_map = [
+                ("10_days", "10 Days"), ("20_days", "20 Days"), ("30_days", "30 Days"),
+                ("60_days", "60 Days"), ("3_months", "3 Months"), ("6_months", "6 Months"),
+            ]
+            cols_cmp = st.columns(3)
+            for i, (key, label) in enumerate(horizon_map):
+                p = multi.get(key, {})
+                if p and "error" not in p:
+                    ret = p["predicted_return"]
+                    ret_color = "#10b981" if ret > 0 else "#ef4444"
+                    dir_icon = "↑" if p["direction"] == "UP" else ("↓" if p["direction"] == "DOWN" else "→")
+                    with cols_cmp[i % 3]:
+                        st.markdown(f"""
+                        <div class="stat-card" style="margin-bottom:10px;">
+                            <div style='font-size:.72rem;color:#334155;font-weight:700;'>{label}</div>
+                            <div style='font-size:1.4rem;font-weight:900;color:{ret_color};margin:6px 0;'>{dir_icon} {ret:+.1f}%</div>
+                            <div style='font-size:.85rem;color:#94a3b8;'>₹{p["predicted_price"]:,.0f}</div>
+                            <div style='font-size:.68rem;color:#475569;'>₹{p["price_low"]:,.0f} – ₹{p["price_high"]:,.0f}</div>
+                            <div style='font-size:.72rem;color:#3b82f6;margin-top:4px;'>Conf: {p["confidence"]:.0%}</div>
+                        </div>""", unsafe_allow_html=True)
+
+            # Forecast chart across all horizons
+            st.markdown("---")
+            x_fore, y_fore, y_low, y_high, colors_f = [], [], [], [], []
+            for key, label in horizon_map:
+                p = multi.get(key, {})
+                if p and "error" not in p:
+                    x_fore.append(p["horizon_days"])
+                    y_fore.append(p["predicted_price"])
+                    y_low.append(p["price_low"])
+                    y_high.append(p["price_high"])
+                    colors_f.append("#10b981" if p["direction"] == "UP" else "#ef4444")
+
+            if x_fore:
+                fig_cmp = go.Figure()
+                fig_cmp.add_trace(go.Scatter(
+                    x=x_fore + x_fore[::-1], y=y_high + y_low[::-1],
+                    fill="toself", fillcolor="rgba(99,102,241,.08)",
+                    line=dict(color="rgba(0,0,0,0)"), name="Price Range",
+                ))
+                fig_cmp.add_trace(go.Scatter(
+                    x=x_fore, y=y_fore, mode="markers+lines+text",
+                    text=[f"{((p/price_cmp-1)*100):+.1f}%" for p in y_fore],
+                    textposition="top center",
+                    marker=dict(size=12, color=colors_f, line=dict(color="white", width=2)),
+                    line=dict(color="#94a3b8", width=1.5, dash="dash"), name="Forecast",
+                ))
+                fig_cmp.add_hline(y=price_cmp, line_color="#f59e0b", line_dash="dot",
+                                   annotation_text=f"Current ₹{price_cmp:,.2f}")
+                fig_cmp.update_layout(**_layout(f"{sym_cmp} — Multi-Horizon Price Forecast", height=420))
+                fig_cmp.update_layout(xaxis_title="Days from Today", yaxis_title="Price (₹)")
+                st.plotly_chart(fig_cmp, use_container_width=True)
+
+# ── Footer ────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown(f"""
+<div style='display:flex;justify-content:space-between;align-items:center;color:#1e3a5f;font-size:.65rem;flex-wrap:wrap;gap:6px;'>
+    <span>⚡ QuantSignal India v6.0 — Dual Mode &nbsp;|&nbsp; {len(INTRADAY_STOCKS)} stocks &nbsp;|&nbsp; 14 sectors</span>
+    <span>Data: Yahoo Finance (15-min delayed) &nbsp;|&nbsp; Not financial advice &nbsp;|&nbsp; Always use stop-loss</span>
+    <span>{datetime.now().strftime("%d %b %Y %I:%M %p")}</span>
+</div>""", unsafe_allow_html=True)
