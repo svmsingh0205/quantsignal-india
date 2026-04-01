@@ -364,3 +364,190 @@ if scan_btn or best_btn:
     st.session_state["pennies"] = [t for t in trades if t["is_penny"]]
     st.session_state["scan_time"] = datetime.now().strftime("%I:%M:%S %p")
     st.session_state["scan_date"] = datetime.now().strftime("%d %b %Y")
+
+# ── MAIN TABS ─────────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📡 Live Signals",
+    "🪙 Penny Stocks",
+    "🔮 Next-Day Picks",
+    "📈 Forecast",
+    "🔎 Stock Explorer",
+    "📋 Reports",
+])
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — LIVE INTRADAY SIGNALS
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab1:
+    if "buys" not in st.session_state:
+        # Welcome screen
+        st.markdown(f"""
+        <div style='text-align:center;padding:40px 20px;'>
+            <div style='font-size:3.5rem;margin-bottom:12px;'>⚡</div>
+            <div style='font-size:1.8rem;font-weight:900;color:#f1f5f9;margin-bottom:8px;'>Live Intraday Signal Engine</div>
+            <div style='color:#334155;font-size:0.95rem;margin-bottom:32px;'>
+                Scanning <b style='color:#2563eb;'>{len(universe)}</b> NSE stocks in parallel using VWAP, EMA, RSI, Supertrend & MACD
+            </div>
+        </div>""", unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns(4)
+        for col, icon, num, lbl in [(c1,"📡",len(universe),"Stocks"),(c2,"🏭","14","Sectors"),(c3,"📊","7","Indicators"),(c4,"🤖","ML+TA","Engine")]:
+            col.markdown(f'<div class="stat-card"><div style="font-size:1.6rem;">{icon}</div><div class="stat-num">{num}</div><div class="stat-label">{lbl}</div></div>', unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("### 🌍 Active Geopolitical Themes")
+        themes = [
+            ("🛡️","India-US Defence Deal","HAL, BEL, BDL, GRSE","35%+ sector rally"),
+            ("🏦","PSU Bank Outperformance","Canara, Indian Bank, BOI","+31-68% YTD"),
+            ("🏗️","Infra Supercycle","RVNL, IRFC, KEC","₹11L cr budget"),
+            ("⚡","Energy Security","NTPC, Suzlon, SJVN","Renewables push"),
+            ("🧪","China+1 Chemicals","SRF, Deepak Nitrite","Supply chain shift"),
+            ("🚗","EV PLI Scheme","Tata Motors, M&M, Olectra","Govt incentives"),
+        ]
+        tc = st.columns(3)
+        for i, (icon, title, stocks, note) in enumerate(themes):
+            tc[i%3].markdown(f'<div class="stat-card" style="text-align:left;margin-bottom:10px;"><div style="font-size:1.1rem;font-weight:800;color:#e2e8f0;">{icon} {title}</div><div style="color:#475569;font-size:0.78rem;margin-top:4px;">{stocks}</div><div style="color:#2563eb;font-size:0.78rem;font-weight:700;margin-top:2px;">{note}</div></div>', unsafe_allow_html=True)
+    else:
+        buys = st.session_state["buys"]
+        all_t = st.session_state["trades"]
+        scan_time = st.session_state.get("scan_time","")
+
+        # Stats row
+        s1,s2,s3,s4,s5,s6 = st.columns(6)
+        s1.metric("Scanned", len(all_t))
+        s2.metric("BUY Signals", len(buys))
+        s3.metric("WATCH", len(all_t)-len(buys))
+        penny_ct = len([t for t in all_t if t["is_penny"]])
+        s4.metric("Penny Stocks", penny_ct)
+        if buys:
+            s5.metric("Best Confidence", f"{buys[0]['confidence']:.0%}", buys[0]["symbol"])
+            s6.metric("Best R:R", f"{buys[0]['risk_reward']}x", buys[0]["sector"])
+        st.markdown("---")
+
+        if not buys:
+            st.warning("No BUY signals found. Try lowering Min Confidence or removing filters.")
+        else:
+            best = buys[0]
+            st.markdown(f"### 🏆 #1 Best Trade — {scan_time}")
+            cl, cm, cr = st.columns([2.5, 2, 1.2])
+            with cl:
+                penny_tag = '<span class="badge-penny">🪙 PENNY</span> ' if best["is_penny"] else ""
+                st.markdown(f"""
+                <div class="trade-card">
+                    <div style='margin-bottom:6px;'>
+                        <span class="badge-sector">{best["sector"]}</span>
+                        {penny_tag}
+                        <span style='color:{best["risk_level"].split()[0]};font-size:0.72rem;font-weight:700;'>{best["risk_level"]}</span>
+                    </div>
+                    <div class="stock-title">{best["symbol"]}</div>
+                    <div class="price-big">₹{best["price"]:,.2f}</div>
+                    <div style='margin-top:12px;'>
+                        <span class="badge-buy">BUY &nbsp;{best["confidence"]:.0%} Confidence</span>
+                    </div>
+                    <div style='margin-top:10px;'>
+                        {''.join(f'<span class="reason-chip">{r}</span>' for r in best["reasons"])}
+                    </div>
+                    <div style='margin-top:10px;color:#334155;font-size:0.75rem;'>⏱ {best["holding"]}</div>
+                </div>""", unsafe_allow_html=True)
+            with cm:
+                st.metric("🎯 Target 1", f"₹{best['target_1']:,.2f}", f"+₹{best['profit']:,.2f}")
+                st.metric("🎯 Target 2", f"₹{best['target_2']:,.2f}")
+                st.metric("🛑 Stop Loss", f"₹{best['stop_loss']:,.2f}", f"-₹{best['loss']:,.2f}", delta_color="inverse")
+            with cr:
+                st.metric("Qty", best["qty"])
+                st.metric("Invest", f"₹{best['invested']:,.0f}")
+                st.metric("R:R", f"{best['risk_reward']}x")
+                st.metric("RSI", best["rsi"])
+
+            # Chart
+            if "df" in best and not best["df"].empty:
+                dc = best["df"].tail(100)
+                fig = make_subplots(rows=3, cols=1, row_heights=[0.60,0.20,0.20],
+                                    shared_xaxes=True, vertical_spacing=0.02)
+                fig.add_trace(go.Candlestick(
+                    x=dc.index, open=dc["Open"], high=dc["High"], low=dc["Low"], close=dc["Close"],
+                    name="Price", increasing=dict(line=dict(color="#10b981"),fillcolor="#10b981"),
+                    decreasing=dict(line=dict(color="#ef4444"),fillcolor="#ef4444"),
+                ), row=1, col=1)
+                for cn, col, dash, lbl in [("VWAP","#f59e0b","dot","VWAP"),("EMA9","#6366f1","solid","EMA9"),("EMA21","#ec4899","solid","EMA21")]:
+                    if cn in dc.columns:
+                        fig.add_trace(go.Scatter(x=dc.index, y=dc[cn], mode="lines",
+                            line=dict(color=col,width=1.2,dash=dash), name=lbl), row=1, col=1)
+                fig.add_hline(y=best["price"], line_color="#6366f1", line_width=1.5, annotation_text="ENTRY", row=1, col=1)
+                fig.add_hline(y=best["target_1"], line_color="#10b981", line_dash="dash", annotation_text="T1", row=1, col=1)
+                fig.add_hline(y=best["stop_loss"], line_color="#ef4444", line_dash="dash", annotation_text="SL", row=1, col=1)
+                if "RSI" in dc.columns:
+                    fig.add_trace(go.Scatter(x=dc.index, y=dc["RSI"], mode="lines",
+                        line=dict(color="#a78bfa",width=1.5), name="RSI",
+                        fill="tozeroy", fillcolor="rgba(167,139,250,0.05)"), row=2, col=1)
+                    fig.add_hline(y=70, line_color="#ef4444", line_dash="dot", line_width=0.8, row=2, col=1)
+                    fig.add_hline(y=30, line_color="#10b981", line_dash="dot", line_width=0.8, row=2, col=1)
+                vcols = ["#10b981" if c >= o else "#ef4444" for c,o in zip(dc["Close"],dc["Open"])]
+                fig.add_trace(go.Bar(x=dc.index, y=dc["Volume"], marker_color=vcols, name="Vol", opacity=0.8), row=3, col=1)
+                layout = _chart_layout(height=500)
+                layout["xaxis_rangeslider_visible"] = False
+                fig.update_layout(**layout)
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("---")
+            # Sector + confidence charts
+            col_sec, col_conf = st.columns(2)
+            with col_sec:
+                st.markdown("### 📊 BUY Signals by Sector")
+                sc_cnt = {}
+                for t in buys:
+                    sc_cnt[t["sector"]] = sc_cnt.get(t["sector"], 0) + 1
+                sc_df = pd.DataFrame(sorted(sc_cnt.items(), key=lambda x: x[1], reverse=True), columns=["Sector","Count"])
+                fig_s = go.Figure(go.Bar(x=sc_df["Count"], y=sc_df["Sector"], orientation="h",
+                    marker=dict(color=sc_df["Count"], colorscale=[[0,"#0f2a4a"],[1,"#06b6d4"]]),
+                    text=sc_df["Count"], textposition="outside"))
+                fig_s.update_layout(**_chart_layout(height=280))
+                fig_s.update_layout(yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_s, use_container_width=True)
+            with col_conf:
+                st.markdown("### 🎯 Top 15 Confidence")
+                top15 = buys[:15]
+                fig_c = go.Figure(go.Bar(
+                    x=[t["symbol"] for t in top15], y=[t["confidence"] for t in top15],
+                    marker=dict(color=[t["confidence"] for t in top15],
+                                colorscale=[[0,"#dc2626"],[0.5,"#f59e0b"],[1,"#10b981"]], cmin=0, cmax=1),
+                    text=[f"{t['confidence']:.0%}" for t in top15], textposition="outside"))
+                fig_c.update_layout(**_chart_layout(height=280))
+                fig_c.update_layout(yaxis=dict(range=[0,1.15], tickformat=".0%"))
+                st.plotly_chart(fig_c, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown(f"### 📋 All BUY Signals ({len(buys)} stocks)")
+            tbl = pd.DataFrame([{
+                "#": i+1, "Stock": t["symbol"], "Sector": t["sector"],
+                "Price": f"₹{t['price']:,.2f}", "Target": f"₹{t['target_1']:,.2f}",
+                "SL": f"₹{t['stop_loss']:,.2f}", "Conf": f"{t['confidence']:.0%}",
+                "R:R": f"{t['risk_reward']}x", "Qty": t["qty"],
+                "Invest": f"₹{t['invested']:,.0f}", "Profit": f"+₹{t['profit']:,.2f}",
+                "Loss": f"-₹{t['loss']:,.2f}", "RSI": t["rsi"],
+                "Vol": f"{t['vol_ratio']:.1f}x", "ST": t["supertrend"],
+                "Risk": t["risk_level"], "Penny": "🪙" if t["is_penny"] else "",
+            } for i, t in enumerate(buys)])
+            st.dataframe(tbl, use_container_width=True, hide_index=True, height=min(600, 55+38*len(tbl)))
+
+            st.markdown("---")
+            st.markdown("### 🔎 Stock Details (Top 15)")
+            for t in buys[:15]:
+                icon = "🟢" if t["confidence"] >= 0.65 else "🟡"
+                penny_tag = " 🪙" if t["is_penny"] else ""
+                with st.expander(f"{icon} {t['symbol']}{penny_tag} [{t['sector']}] ₹{t['price']:,.2f} • {t['confidence']:.0%} • R:R {t['risk_reward']}x"):
+                    d1,d2,d3,d4,d5 = st.columns(5)
+                    d1.metric("Entry", f"₹{t['price']:,.2f}")
+                    d2.metric("Target 1", f"₹{t['target_1']:,.2f}", f"+₹{t['profit']:,.2f}")
+                    d3.metric("Stop Loss", f"₹{t['stop_loss']:,.2f}", f"-₹{t['loss']:,.2f}", delta_color="inverse")
+                    d4.metric("R:R", f"{t['risk_reward']}x")
+                    d5.metric("Risk", t["risk_level"])
+                    st.markdown("".join(f'<span class="reason-chip">{r}</span>' for r in t["reasons"]), unsafe_allow_html=True)
+                    # Global factors
+                    factors = StockMetadata.get_global_factors(t["sector"])
+                    st.markdown(f'<div style="margin-top:8px;font-size:0.72rem;color:#475569;font-weight:700;">🌍 SECTOR THEME: <span style="color:#3b82f6;">{factors["theme"]}</span></div>', unsafe_allow_html=True)
+                    pos_html = "".join(f'<span class="factor-pos">✅ {f}</span>' for f in factors["positive"][:3])
+                    neg_html = "".join(f'<span class="factor-neg">⚠️ {f}</span>' for f in factors["negative"][:2])
+                    st.markdown(pos_html + neg_html, unsafe_allow_html=True)
+
+    if auto_refresh and "buys" in st.session_state:
+        _time.sleep(refresh_sec)
+        st.rerun()
