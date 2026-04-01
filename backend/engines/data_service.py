@@ -138,6 +138,12 @@ class DataService:
     @staticmethod
     def _clean(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
+        # Strip MultiIndex if present (yfinance bug with some versions)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        # Keep only standard OHLCV columns
+        keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+        df = df[keep]
         df.index = pd.to_datetime(df.index)
         df = df.sort_index()
         df = df.ffill().dropna()

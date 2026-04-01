@@ -21,24 +21,38 @@ class IntradayEngine:
 
     @staticmethod
     def fetch_intraday(symbol: str, period: str = "5d", interval: str = "5m") -> pd.DataFrame:
+        """
+        Fetch intraday OHLCV using Ticker.history() — avoids the yfinance
+        MultiIndex / duplicate-column bug that causes identical prices across
+        different stocks when yf.download() is used in a threaded context.
+        """
         try:
-            df = yf.download(symbol, period=period, interval=interval, progress=False)
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period=period, interval=interval)
             if df.empty:
                 return pd.DataFrame()
+            # Ticker.history() never returns MultiIndex, but guard anyway
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            return df.dropna()
+            df.index = pd.to_datetime(df.index)
+            df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+            return df
         except Exception as e:
-            logger.warning(f"Fetch error {symbol}: {e}")
+            logger.warning(f"fetch_intraday error {symbol}: {e}")
             return pd.DataFrame()
 
     @staticmethod
     def fetch_daily(symbol: str, period: str = "3mo") -> pd.DataFrame:
         try:
-            df = yf.download(symbol, period=period, interval="1d", progress=False)
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period=period, interval="1d")
+            if df.empty:
+                return pd.DataFrame()
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            return df.dropna()
+            df.index = pd.to_datetime(df.index)
+            df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+            return df
         except Exception:
             return pd.DataFrame()
 
