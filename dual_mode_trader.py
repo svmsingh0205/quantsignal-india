@@ -605,3 +605,132 @@ else:
                     Uses: ML ensemble · Technical analysis · Seasonal trends · Geopolitical themes · Risk metrics
                 </div>
             </div>""", unsafe_allow_html=True)
+
+    # ── Deep Dive tab ─────────────────────────────────────────────────────────
+    with tab_detail:
+        st.markdown("### 🔍 Stock Deep Dive — Delivery Analysis")
+        dd_c1, dd_c2, dd_c3 = st.columns([2, 1, 1])
+        with dd_c1:
+            dd_sym = st.selectbox("Select Stock", ALL_SYMBOLS_CLEAN,
+                                   index=ALL_SYMBOLS_CLEAN.index("RELIANCE") if "RELIANCE" in ALL_SYMBOLS_CLEAN else 0,
+                                   key="dd_sym")
+        with dd_c2:
+            dd_period = st.selectbox("Chart Period", ["3mo", "6mo", "1y", "2y"], index=2, key="dd_period")
+        with dd_c3:
+            dd_btn = st.button("🔍 Analyse", type="primary", use_container_width=True, key="dd_btn")
+
+        if dd_btn:
+            with st.spinner(f"Analysing {dd_sym} for {holding_choice} delivery..."):
+                df_dd = DataService.fetch_ohlcv(f"{dd_sym}.NS", period="2y")
+                if df_dd.empty:
+                    st.error(f"No data for {dd_sym}")
+                else:
+                    pred_dd = PredictionEngine._train_predict(df_dd, horizon=holding_days)
+                    multi_dd = PredictionEngine.predict_multi_horizon(df_dd)
+                    sector_dd = SYMBOL_TO_SECTOR.get(dd_sym, "Other")
+                    factors_dd = StockMetadata.get_global_factors(sector_dd)
+                    from backend.engines.risk_engine import RiskEngine
+                    risk_dd = RiskEngine.compute_all(df_dd["Close"])
+                    st.session_state["dd_result"] = {
+                        "symbol": dd_sym, "df": df_dd, "pred": pred_dd,
+                        "multi": multi_dd, "sector": sector_dd,
+                        "factors": factors_dd, "risk": risk_dd,
+                    }
+
+        if "dd_result" in st.session_state:
+            r = st.session_state["dd_result"]
+            df_dd = r["df"]
+            pred_dd = r["pred"]
+            sym_dd = r["symbol"]
+            price_dd = float(df_dd["Close"].iloc[-1])
+
+            # Key metrics
+            ret_dd = (price_dd / float(df_dd["Close"].iloc[0]) - 1) * 100
+            risk_dd = r["risk"]
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("Price", f"₹{price_dd:,.2f}")
+            m2.metric("Period Return", f"{ret_dd:+.1f}%")
+            m3.metric("Sharpe", f"{risk_dd.get('sharpe_ratio', 0):.2f}")
+            m4.metric("Sortino", f"{risk_dd.get('sortino_ratio', 0):.2f}")
+            m5.metric("Ann. Volatility", f"{risk_dd.get('volatility_annual', 0):.1%}")
+            m6.metric("Max Drawdown", f"{risk_dd.get('max_drawdown', {}).get('max_drawdown', 0):.1%}")
+
+            if pred_dd and "error" not in pred_dd:
+                st.markdown("---")
+                ret_color = "#10b981" if pred_dd["predicted_return"] > 0 else "#ef4444"
+                st.markdown(f"""
+                <div class="trade-card">
+                    <div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap;'>
+                        <span style='font-size:1.1rem;font-weight:900;color:#f1f5f9;'>{sym_dd}</span>
+                        <span class="badge-sector">{r["sector"]}</span>
+                        <span style='color:{ret_color};font-weight:800;font-size:1rem;'>{pred_dd["predicted_return"]:+.1f}% in {holding_days} days</span>
+                        <span style='color:#3b82f6;font-size:.82rem;'>Confidence: {pred_dd["confidence"]:.0%}</span>
+                    </div>
+                    <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:12px;'>
+                        <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Entry</div><div style='color:#f1f5f9;font-weight:700;'>₹{pred_dd["current_price"]:,.2f}</div></div>
+                        <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Target</div><div style='color:#10b981;font-weight:700;'>₹{pred_dd["predicted_price"]:,.2f}</div></div>
+                        <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Bear Case</div><div style='color:#ef4444;font-weight:700;'>₹{pred_dd["price_low"]:,.2f}</div></div>
+                        <div><div style='color:#475569;font-size:.65rem;text-transform:uppercase;'>Bull Case</div><div style='color:#06b6d4;font-weight:700;'>₹{pred_dd["price_high"]:,.2f}</div></div>
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+            # Multi-horizon table
+            if r["multi"]:
+                st.markdown("---")
+                st.markdown("### 📅 Multi-Horizon Forecast")
+                h_data = []
+                for key, label in [("10_days","10D"),("20_days","20D"),("30_days","30D"),("3_months","3M"),("6_months","6M")]:
+                    p = r["multi"].get(key, {})
+                    if p and "error" not in p:
+                        h_data.append({
+                            "Horizon": label, "Direction": p["direction"],
+                            "Return": f"{p['predicted_return']:+.1f}%",
+                            "Target": f"₹{p['predicted_price']:,.0f}",
+                            "Range": f"₹{p['price_low']:,.0f}–₹{p['price_high']:,.0f}",
+                            "Confidence": f"{p['confidence']:.0%}",
+                        })
+                if h_data:
+                    st.dataframe(pd.DataFrame(h_data), use_container_width=True, hide_index=True)
+
+            # Price chart
+            st.markdown("---")
+            df_chart = DataService.fetch_ohlcv(f"{sym_dd}.NS", period=dd_period)
+            if not df_chart.empty:
+                fig_dd = make_subplots(rows=3, cols=1, row_heights=[.60, .20, .20],
+                                       shared_xaxes=True, vertical_spacing=.02)
+                fig_dd.add_trace(go.Candlestick(
+                    x=df_chart.index, open=df_chart["Open"], high=df_chart["High"],
+                    low=df_chart["Low"], close=df_chart["Close"], name="Price",
+                    increasing=dict(line=dict(color="#10b981"), fillcolor="#10b981"),
+                    decreasing=dict(line=dict(color="#ef4444"), fillcolor="#ef4444"),
+                ), row=1, col=1)
+                for w, color in [(20, "#f59e0b"), (50, "#6366f1"), (200, "#ec4899")]:
+                    if len(df_chart) >= w:
+                        fig_dd.add_trace(go.Scatter(x=df_chart.index, y=df_chart["Close"].rolling(w).mean(),
+                            mode="lines", line=dict(color=color, width=1), name=f"MA{w}"), row=1, col=1)
+                delta_c = df_chart["Close"].diff()
+                gain_c = delta_c.where(delta_c > 0, 0).rolling(14).mean()
+                loss_c = (-delta_c.where(delta_c < 0, 0)).rolling(14).mean()
+                rsi_c = 100 - (100 / (1 + gain_c / loss_c.replace(0, np.nan)))
+                fig_dd.add_trace(go.Scatter(x=df_chart.index, y=rsi_c, mode="lines",
+                    line=dict(color="#a78bfa", width=1.5), name="RSI"), row=2, col=1)
+                fig_dd.add_hline(y=70, line_color="#ef4444", line_dash="dot", line_width=.8, row=2, col=1)
+                fig_dd.add_hline(y=30, line_color="#10b981", line_dash="dot", line_width=.8, row=2, col=1)
+                vcols_dd = ["#10b981" if c >= o else "#ef4444" for c, o in zip(df_chart["Close"], df_chart["Open"])]
+                fig_dd.add_trace(go.Bar(x=df_chart.index, y=df_chart["Volume"],
+                    marker_color=vcols_dd, name="Volume", opacity=.8), row=3, col=1)
+                fig_dd.update_layout(**_layout(f"{sym_dd} — {dd_period} Chart", height=580))
+                fig_dd.update_layout(xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig_dd, use_container_width=True)
+
+            # Global factors
+            st.markdown("---")
+            cf1, cf2 = st.columns(2)
+            with cf1:
+                st.markdown(f"### 🌍 {r['sector']} — {r['factors']['theme']}")
+                for f in r["factors"]["positive"]:
+                    st.markdown(f'<span class="factor-pos">✅ {f}</span>', unsafe_allow_html=True)
+            with cf2:
+                st.markdown("### ⚠️ Risk Factors")
+                for f in r["factors"]["negative"]:
+                    st.markdown(f'<span class="factor-neg">⚠️ {f}</span>', unsafe_allow_html=True)
