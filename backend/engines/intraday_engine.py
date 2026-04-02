@@ -28,14 +28,16 @@ class IntradayEngine:
         """
         try:
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval=interval)
+            df = ticker.history(period=period, interval=interval, auto_adjust=True, actions=False)
             if df.empty:
                 return pd.DataFrame()
-            # Ticker.history() never returns MultiIndex, but guard anyway
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             df.index = pd.to_datetime(df.index)
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
             df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+            df = df[~df.index.duplicated(keep="last")]
             return df
         except Exception as e:
             logger.warning(f"fetch_intraday error {symbol}: {e}")
@@ -45,13 +47,16 @@ class IntradayEngine:
     def fetch_daily(symbol: str, period: str = "3mo") -> pd.DataFrame:
         try:
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval="1d")
+            df = ticker.history(period=period, interval="1d", auto_adjust=True, actions=False)
             if df.empty:
                 return pd.DataFrame()
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             df.index = pd.to_datetime(df.index)
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
             df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+            df = df[~df.index.duplicated(keep="last")]
             return df
         except Exception:
             return pd.DataFrame()

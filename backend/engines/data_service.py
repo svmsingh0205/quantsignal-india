@@ -40,11 +40,22 @@ class DataService:
             return cls._cache[cache_key][1].copy()
         try:
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval=interval)
+            df = ticker.history(period=period, interval=interval, auto_adjust=True, actions=False)
+            if df.empty:
+                # Fallback: try a longer period to get more data
+                _fallback_map = {"1y": "2y", "2y": "5y", "3mo": "6mo", "6mo": "1y", "5d": "1mo"}
+                fallback = _fallback_map.get(period)
+                if fallback:
+                    logger.info(f"Empty data for {symbol} period={period}, trying {fallback}")
+                    df = ticker.history(period=fallback, interval=interval, auto_adjust=True, actions=False)
             if df.empty:
                 logger.warning(f"No data for {symbol}")
                 return pd.DataFrame()
             df = cls._clean(df)
+            # If we got fewer rows than expected for daily data, try to fill gaps
+            if interval == "1d" and len(df) > 0:
+                df = df.asfreq("B").ffill()  # business-day frequency, forward-fill gaps
+                df = df.dropna(subset=["Close"])
             cls._cache[cache_key] = (_now_utc(), df)
             return df.copy()
         except Exception as e:
@@ -152,7 +163,12 @@ class DataService:
         keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
         df = df[keep]
         df.index = pd.to_datetime(df.index)
+        # Strip timezone info — keeps index as naive datetime for consistent merging
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
         df = df.sort_index()
+        # Remove duplicate index entries (can happen with yfinance splits)
+        df = df[~df.index.duplicated(keep="last")]
         df = df.ffill().dropna()
         return df
 
@@ -169,4 +185,15 @@ class DataService:
     @classmethod
     def clear_cache(cls):
         cls._cache.clear()
+        cls._price_cache.clear()
+
+    @classmethod
+    def clear_intraday_cache(cls):
+        """Clear intraday (5m/1m) bars and live-price cache for fresh scan data."""
+        keys_to_del = [
+            k for k in list(cls._cache.keys())
+            if any(x in k for x in ["5m", "1m", "5d", "15m", "30m"])
+        ]
+        for k in keys_to_del:
+            cls._cache.pop(k, None)
         cls._price_cache.clear()

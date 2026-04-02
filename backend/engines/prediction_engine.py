@@ -1,6 +1,23 @@
 """
-Prediction Engine — Next-day, 10/20/30-day, and monthly forecasts.
-Uses ML ensemble + Monte Carlo + trend analysis.
+Prediction Engine — Production ML Trading Predictions
+=======================================================
+Models (in order of preference):
+  1. LightGBM  (fast, handles tabular data best)
+  2. XGBoost   (strong gradient boosting)
+  3. GBM/RF    (sklearn fallback if lgbm/xgb not installed)
+  4. Ridge     (always available)
+
+Features:
+  - OHLCV technical features (RSI, MACD, BB, ATR, momentum)
+  - Volume + order flow proxies
+  - Global macro context (injected from market_context)
+  - News sentiment score (injected from news_engine)
+
+Output:
+  - direction: UP / DOWN / NEUTRAL
+  - confidence: real model accuracy-weighted score
+  - predicted_price, predicted_return
+  - reasoning: human-readable explanation
 """
 from __future__ import annotations
 import numpy as np
@@ -11,6 +28,19 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 import warnings
 warnings.filterwarnings("ignore")
+
+# ── Optional high-performance models ─────────────────────────────────────────
+try:
+    import lightgbm as lgb
+    _HAS_LGB = True
+except ImportError:
+    _HAS_LGB = False
+
+try:
+    import xgboost as xgb
+    _HAS_XGB = True
+except ImportError:
+    _HAS_XGB = False
 
 
 class PredictionEngine:
@@ -54,49 +84,94 @@ class PredictionEngine:
         return d
 
     @staticmethod
-    def _train_predict(df: pd.DataFrame, horizon: int) -> dict:
+    def _build_models() -> dict:
+        """Build model dict — uses LightGBM/XGBoost when available."""
+        models = {}
+        if _HAS_LGB:
+            models["lgbm"] = lgb.LGBMRegressor(
+                n_estimators=300, learning_rate=0.03, max_depth=6,
+                num_leaves=31, random_state=42, n_jobs=-1, verbose=-1,
+            )
+        if _HAS_XGB:
+            models["xgb"] = xgb.XGBRegressor(
+                n_estimators=300, learning_rate=0.03, max_depth=6,
+                random_state=42, n_jobs=-1, verbosity=0,
+            )
+        # Always include sklearn fallbacks
+        models["gbm"]   = GradientBoostingRegressor(n_estimators=200, max_depth=4, learning_rate=0.05, random_state=42)
+        models["rf"]    = RandomForestRegressor(n_estimators=150, max_depth=6, random_state=42, n_jobs=-1)
+        models["ridge"] = Ridge(alpha=1.0)
+        return models
+
+    @staticmethod
+    def _train_predict(
+        df: pd.DataFrame,
+        horizon: int,
+        macro_score: float = 0.5,
+        news_sentiment: float = 0.0,
+    ) -> dict:
+        """
+        Train ensemble and predict future return.
+        macro_score    : 0–1 from market_context (injected as feature)
+        news_sentiment : -1 to +1 from news_engine (injected as feature)
+        """
         d = PredictionEngine._build_features(df)
         feat_cols = [c for c in d.columns if c not in ["Open","High","Low","Close","Volume","Dividends","Stock Splits"]]
         d = d.dropna()
         if len(d) < max(60, horizon * 3):
             return None
 
+        # Inject macro + news as constant features (same value for all rows)
+        d["macro_score"]    = macro_score
+        d["news_sentiment"] = news_sentiment
+        feat_cols = feat_cols + ["macro_score", "news_sentiment"]
+
         # Target: future return over horizon days
         d["target"] = d["Close"].shift(-horizon) / d["Close"] - 1
         d = d.dropna()
+
+        if len(d) < 30:
+            return None
 
         X = d[feat_cols].values
         y = d["target"].values
         scaler = StandardScaler()
         X_sc = scaler.fit_transform(X)
 
-        models = {
-            "gbm": GradientBoostingRegressor(n_estimators=200, max_depth=4, learning_rate=0.05, random_state=42),
-            "rf":  RandomForestRegressor(n_estimators=200, max_depth=6, random_state=42, n_jobs=-1),
-            "ridge": Ridge(alpha=1.0),
-        }
+        models = PredictionEngine._build_models()
 
         tscv = TimeSeriesSplit(n_splits=3)
         cv_scores = {}
         for name, model in models.items():
             scores = []
             for tr, val in tscv.split(X_sc):
-                model.fit(X_sc[tr], y[tr])
-                pred = model.predict(X_sc[val])
-                corr = np.corrcoef(pred, y[val])[0, 1] if len(val) > 2 else 0
-                scores.append(corr if not np.isnan(corr) else 0)
+                try:
+                    model.fit(X_sc[tr], y[tr])
+                    pred = model.predict(X_sc[val])
+                    corr = np.corrcoef(pred, y[val])[0, 1] if len(val) > 2 else 0
+                    scores.append(corr if not np.isnan(corr) else 0)
+                except Exception:
+                    scores.append(0)
             cv_scores[name] = float(np.mean(scores))
 
-        # Final fit
+        # Final fit on all data
         for model in models.values():
-            model.fit(X_sc, y)
+            try:
+                model.fit(X_sc, y)
+            except Exception:
+                pass
 
         # Predict on latest row
         latest = scaler.transform(d[feat_cols].values[-1:])
-        preds = {name: float(models[name].predict(latest)[0]) for name in models}
+        preds = {}
+        for name, model in models.items():
+            try:
+                preds[name] = float(model.predict(latest)[0])
+            except Exception:
+                preds[name] = 0.0
 
-        # Weighted ensemble (by CV score, min 0)
-        weights = {k: max(v, 0.01) for k, v in cv_scores.items()}
+        # Weighted ensemble (by CV score, min 0.01)
+        weights = {k: max(v, 0.01) for k, v in cv_scores.items() if k in preds}
         total_w = sum(weights.values())
         ensemble_return = sum(preds[k] * weights[k] / total_w for k in models)
 
@@ -132,9 +207,15 @@ class PredictionEngine:
         }
 
     @staticmethod
-    def predict_next_day(df: pd.DataFrame) -> dict:
+    def predict_next_day(
+        df: pd.DataFrame,
+        macro_score: float = 0.5,
+        news_sentiment: float = 0.0,
+    ) -> dict:
         """Next trading day prediction with market condition analysis."""
-        result = PredictionEngine._train_predict(df, horizon=1)
+        result = PredictionEngine._train_predict(df, horizon=1,
+                                                  macro_score=macro_score,
+                                                  news_sentiment=news_sentiment)
         if not result:
             return {"error": "Insufficient data"}
 
@@ -174,18 +255,21 @@ class PredictionEngine:
         return result
 
     @staticmethod
-    def predict_multi_horizon(df: pd.DataFrame) -> dict:
+    def predict_multi_horizon(
+        df: pd.DataFrame,
+        macro_score: float = 0.5,
+        news_sentiment: float = 0.0,
+    ) -> dict:
         """Predictions for 10, 20, 30 days and 3, 6 months."""
         horizons = {
-            "10_days": 10,
-            "20_days": 20,
-            "30_days": 30,
-            "3_months": 63,
-            "6_months": 126,
+            "10_days": 10, "20_days": 20, "30_days": 30,
+            "3_months": 63, "6_months": 126,
         }
         results = {}
         for label, h in horizons.items():
-            r = PredictionEngine._train_predict(df, horizon=h)
+            r = PredictionEngine._train_predict(df, horizon=h,
+                                                 macro_score=macro_score,
+                                                 news_sentiment=news_sentiment)
             results[label] = r if r else {"error": "Insufficient data"}
         return results
 

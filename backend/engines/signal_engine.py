@@ -9,6 +9,8 @@ from .data_service import DataService
 from .feature_engine import FeatureEngine
 from .ml_engine import MLEngine
 from .multi_analyzer import MultiAnalyzer
+from .elite_indicators import compute_elite_score
+from .universe import MASTER_UNIVERSE, SYMBOL_TO_SECTOR as _UNIVERSE_SECTOR
 from ..config import (
     ALL_SYMBOLS, MIN_CONFIDENCE, MIN_RISK_REWARD,
     MAX_SIGNALS, ML_WEIGHT, ENTRY_SCORE_WEIGHT, RISK_WEIGHT, SECTOR_MAP,
@@ -17,11 +19,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Build reverse symbol → sector map
+# Build reverse symbol → sector map (universe takes priority, config as fallback)
 _SYMBOL_SECTOR: dict[str, str] = {}
 for _sec, _syms in SECTOR_MAP.items():
     for _s in _syms:
         _SYMBOL_SECTOR[_s] = _sec
+# Overlay universe sector map
+_SYMBOL_SECTOR.update(_UNIVERSE_SECTOR)
+
+# Extended symbol list: use full universe if available
+_FULL_UNIVERSE = MASTER_UNIVERSE if MASTER_UNIVERSE else ALL_SYMBOLS
 
 
 class SignalEngine:
@@ -40,7 +47,7 @@ class SignalEngine:
         risk_pct: float = 0.02,
         enabled_analyzers: Optional[list[str]] = None,
     ) -> list[dict]:
-        symbols = symbols or ALL_SYMBOLS
+        symbols = symbols or _FULL_UNIVERSE
         raw_signals = []
         for sym in symbols:
             try:
@@ -79,18 +86,26 @@ class SignalEngine:
         vol = last.get("Volatility", 0.25)
         risk_score = float(np.clip(1 - vol / 0.5, 0, 1))
 
+        # ── Elite indicators score ────────────────────────────────────────────
+        try:
+            elite = compute_elite_score(df)
+            elite_score = elite.get("elite_score", 0.5)
+        except Exception:
+            elite_score = 0.5
+
         # ── Multi-analyzer score ──────────────────────────────────────────────
-        sector = _SYMBOL_SECTOR.get(symbol, "")
+        sector = _SYMBOL_SECTOR.get(symbol, _SYMBOL_SECTOR.get(symbol.replace(".NS", ""), ""))
         ma = MultiAnalyzer(enabled_analyzers)
         ma_result = ma.analyze(df, sector=sector, capital=capital, risk_pct=risk_pct)
         ma_score = ma_result.get("combined_score", 0.5)
 
-        # ── Combined confidence (ML 35% + entry 20% + risk 15% + multi 30%) ──
+        # ── Combined confidence (ML 30% + entry 15% + risk 10% + elite 20% + multi 25%) ──
         confidence = (
-            0.35 * prob_up
-            + 0.20 * entry_score
-            + 0.15 * risk_score
-            + 0.30 * ma_score
+            0.30 * prob_up
+            + 0.15 * entry_score
+            + 0.10 * risk_score
+            + 0.20 * elite_score
+            + 0.25 * ma_score
         )
         confidence = float(np.clip(confidence, 0, 1))
 
@@ -144,6 +159,7 @@ class SignalEngine:
             "ml_probability": round(prob_up, 4),
             "entry_score": round(entry_score, 4),
             "risk_score": round(risk_score, 4),
+            "elite_score": round(elite_score, 4),
             "multi_analyzer_score": round(ma_score, 4),
             "analyzer_breakdown": ma_result.get("analyzers", {}),
             "rsi": round(float(rsi), 2),

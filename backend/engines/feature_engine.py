@@ -86,9 +86,52 @@ class FeatureEngine:
         df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
         return df
 
+    @staticmethod
+    def add_ema(df: pd.DataFrame, spans: list[int] = None) -> pd.DataFrame:
+        """Add EMA columns: EMA9, EMA21, EMA50, EMA200."""
+        if spans is None:
+            spans = [9, 21, 50, 200]
+        df = df.copy()
+        for span in spans:
+            if len(df) >= span:
+                df[f"EMA{span}"] = df["Close"].ewm(span=span, adjust=False).mean()
+        return df
+
+    @staticmethod
+    def add_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+        """Add Supertrend indicator."""
+        df = df.copy()
+        hl2 = (df["High"] + df["Low"]) / 2
+        high, low, prev_close = df["High"], df["Low"], df["Close"].shift(1)
+        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean()
+        upper = hl2 + multiplier * atr
+        lower = hl2 - multiplier * atr
+        supertrend = pd.Series(index=df.index, dtype=float)
+        direction = pd.Series(index=df.index, dtype=float)
+        if len(df) < 2:
+            return df
+        supertrend.iloc[0] = upper.iloc[0]
+        direction.iloc[0] = -1
+        for i in range(1, len(df)):
+            if df["Close"].iloc[i] > upper.iloc[i - 1]:
+                direction.iloc[i] = 1
+            elif df["Close"].iloc[i] < lower.iloc[i - 1]:
+                direction.iloc[i] = -1
+            else:
+                direction.iloc[i] = direction.iloc[i - 1]
+            supertrend.iloc[i] = (
+                max(lower.iloc[i], supertrend.iloc[i - 1]) if direction.iloc[i] == 1
+                else min(upper.iloc[i], supertrend.iloc[i - 1])
+            )
+        df["Supertrend"] = supertrend
+        df["ST_Direction"] = direction
+        return df
+
     @classmethod
     def compute_all_features(cls, df: pd.DataFrame) -> pd.DataFrame:
         df = cls.add_moving_averages(df)
+        df = cls.add_ema(df)
         df = cls.add_rsi(df)
         df = cls.add_volatility(df)
         df = cls.add_momentum(df)
@@ -97,6 +140,8 @@ class FeatureEngine:
         df = cls.add_volume_features(df)
         df = cls.add_bollinger_bands(df)
         df = cls.add_macd(df)
+        if len(df) >= 15:
+            df = cls.add_supertrend(df)
         return df
 
     @classmethod

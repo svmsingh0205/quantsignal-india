@@ -26,6 +26,8 @@ from backend.engines.prediction_engine import PredictionEngine
 from backend.engines.stock_metadata import StockMetadata, GLOBAL_FACTORS, PENNY_MAX_PRICE
 from backend.engines.risk_engine import RiskEngine
 from backend.intraday_config import INTRADAY_STOCKS, SECTOR_GROUPS
+from backend.engines.universe import MASTER_UNIVERSE, SECTOR_UNIVERSE, UniverseEngine, PennyStockEngine
+from backend.engines.market_data_router import router as _data_router
 
 st.set_page_config(
     page_title="QuantSignal India",
@@ -173,7 +175,11 @@ for _sec, _syms in SECTOR_GROUPS.items():
     for _s in _syms:
         SYMBOL_TO_SECTOR[_s.replace(".NS", "")] = _sec
 
-ALL_SYMBOLS_CLEAN = sorted(set(s.replace(".NS", "") for s in INTRADAY_STOCKS))
+# Expanded universe: MASTER_UNIVERSE (1,500+) merged with INTRADAY_STOCKS
+_combined_universe = list(dict.fromkeys(
+    [s.replace(".NS", "") for s in INTRADAY_STOCKS] + MASTER_UNIVERSE
+))
+ALL_SYMBOLS_CLEAN = sorted(set(_combined_universe))
 
 # ── EXTENDED NSE/BSE SEARCH LIST (all liquid symbols) ─────────────────────────
 # Combines the intraday universe + common NSE symbols not in intraday list
@@ -271,19 +277,26 @@ def _quick_search(symbol: str) -> dict | None:
 
 def _render_indicator_grid(indicators: list) -> None:
     """Render a row of indicator cards."""
+    import html as _html
     cols = st.columns(min(4, len(indicators)))
     for i, ind in enumerate(indicators):
         col = cols[i % len(cols)]
         score = ind["score"]
         color = "#10b981" if score >= 0.60 else ("#ef4444" if score <= 0.40 else "#f59e0b")
         icon = "🟢" if score >= 0.60 else ("🔴" if score <= 0.40 else "🟡")
+        # Escape HTML special chars in dynamic text to prevent rendering issues
+        safe_name = _html.escape(str(ind["name"]))
+        safe_note = _html.escape(str(ind["note"])[:60])
+        safe_signal = _html.escape(str(ind["signal"]))
+        safe_trend = _html.escape(str(ind["trend"]))
+        ellipsis = "…" if len(str(ind["note"])) > 60 else ""
         with col:
             st.markdown(f"""
             <div class="stat-card" style="text-align:left;margin-bottom:8px;">
-                <div style="font-size:0.65rem;color:#475569;text-transform:uppercase;font-weight:700;">{ind["name"]}</div>
+                <div style="font-size:0.65rem;color:#475569;text-transform:uppercase;font-weight:700;">{safe_name}</div>
                 <div style="font-size:1.2rem;font-weight:900;color:{color};margin:4px 0;">{icon} {score:.0%}</div>
-                <div style="font-size:0.72rem;color:#94a3b8;">{ind["signal"]} · {ind["trend"]}</div>
-                <div style="font-size:0.65rem;color:#334155;margin-top:4px;">{ind["note"][:60]}{'…' if len(ind["note"])>60 else ''}</div>
+                <div style="font-size:0.72rem;color:#94a3b8;">{safe_signal} · {safe_trend}</div>
+                <div style="font-size:0.65rem;color:#334155;margin-top:4px;">{safe_note}{ellipsis}</div>
             </div>""", unsafe_allow_html=True)
 
 
@@ -301,6 +314,8 @@ def _chart_layout(title="", height=450):
 # ── PARALLEL SCAN ─────────────────────────────────────────────────────────────
 from backend.engines.data_validator import get_validated_tick, generate_signal, clear_live_cache
 from backend.engines.market_context import get_market_context, get_market_bias_score, get_position_size_multiplier
+from backend.engines.broker_feed import get_live_tick, get_ohlcv, get_data_source_status, clear_tick_cache, DataSource
+from backend.engines.news_engine import get_news_sentiment
 
 
 # ── _predict_one defined at module level so it's always available ─────────────
@@ -348,107 +363,163 @@ def _predict_one(sym: str) -> dict | None:
 
 def _scan_one(args):
     """
-    Validated scan pipeline per symbol:
-    1. Fetch validated tick (primary fast_info + secondary 1m bars)
-    2. Gate on is_valid — skip if data is stale or sources disagree
-    3. Use validated LTP as price (not stale OHLCV close)
-    4. Run TA indicators on 5m bars for signal scoring
-    5. Cross-check signal with validated VWAP
-    6. Apply market context bias (India VIX + global macro)
+    Production signal pipeline per symbol:
+    1. Live tick from broker (Kite → Upstox → Yahoo)
+    2. Freshness + cross-source validation
+    3. OHLCV bars for TA scoring
+    4. VWAP position check
+    5. Market context bias adjustment
+    6. Structured reasoning output
     """
     sym, capital, max_price, min_conf, penny_only, mkt_bias, psm = args
     try:
-        # ── Step 1: Get validated live tick ──────────────────────────────────
-        tick = get_validated_tick(sym)
+        # ── Step 1: Live validated tick ───────────────────────────────────────
+        clean = sym.replace(".NS", "")
+        tick = get_live_tick(clean)
 
-        # ── Step 2: Fetch 5m bars for TA (uses cached OHLCV) ─────────────────
+        # ── Step 2: OHLCV bars for TA ─────────────────────────────────────────
         engine = IntradayEngine(capital=capital)
         df = engine.fetch_intraday(sym, period="5d", interval="5m")
         if df.empty or len(df) < 30:
             return None
 
-        # ── Step 3: Use validated LTP if available, else fall back to bar close
-        if tick and tick.get("is_valid") and tick["price"] > 0:
-            price = tick["price"]
-            validated_vwap = tick.get("vwap", 0)
-            data_source = tick["source"]
+        # ── Step 3: Price — validated tick > bar close ────────────────────────
+        if tick and tick.is_valid and tick.ltp > 0:
+            price          = tick.ltp
+            validated_vwap = tick.vwap
+            data_source    = tick.source
+            bid            = tick.bid
+            ask            = tick.ask
+            live_volume    = tick.volume
         else:
-            price = float(df["Close"].iloc[-1])
-            validated_vwap = 0
-            data_source = "ohlcv_fallback"
+            price          = float(df["Close"].iloc[-1])
+            validated_vwap = 0.0
+            data_source    = DataSource.YAHOO
+            bid = ask = live_volume = 0
 
         if price > max_price:
             return None
         if penny_only and price > PENNY_MAX_PRICE:
             return None
 
-        # ── Step 4: TA scoring on 5m bars ────────────────────────────────────
+        # ── Step 4: TA scoring ────────────────────────────────────────────────
         df = engine.add_indicators(df)
         sc = engine.score_stock(df)
 
-        # ── Step 5: Override VWAP with validated tick VWAP if available ───────
         effective_vwap = validated_vwap if validated_vwap > 0 else sc["vwap"]
 
-        # Boost/penalise score based on validated VWAP position
-        vwap_boost = 0.0
-        if effective_vwap > 0:
-            if price > effective_vwap * 1.002:   # price clearly above VWAP
-                vwap_boost = 0.05
-            elif price < effective_vwap * 0.998:  # price clearly below VWAP
-                vwap_boost = -0.05
+        # Step 5: Dynamic ATR from daily bars (fixes identical 1.33x RR bug)
+        # 5m ATR is near-zero for many stocks -> always hits 0.5% floor -> RR=1.33x
+        # Solution: use 14-day daily ATR which reflects real stock volatility
+        df_daily_atr = DataService.fetch_ohlcv(sym, period="3mo", interval="1d")
+        if not df_daily_atr.empty and len(df_daily_atr) >= 14:
+            _h = df_daily_atr["High"]
+            _l = df_daily_atr["Low"]
+            _pc = df_daily_atr["Close"].shift(1)
+            _tr = pd.concat([_h - _l, (_h - _pc).abs(), (_l - _pc).abs()], axis=1).max(axis=1)
+            _atr_daily = float(_tr.rolling(14).mean().iloc[-1])
+            atr = _atr_daily if (not np.isnan(_atr_daily) and _atr_daily > price * 0.005) else max(sc["atr"], price * 0.005)
+            # Real volatility for report
+            _vol_real = float(df_daily_atr["Close"].pct_change().std() * (252 ** 0.5))
+        else:
+            atr = max(sc["atr"], price * 0.005)
+            _vol_real = 0.20
 
-        adjusted_score = float(np.clip(sc["score"] + vwap_boost, 0, 1))
-
-        # ── Step 6: Apply market context bias ────────────────────────────────
-        # Boost score in bullish market, penalise in bearish
-        mkt_boost = (mkt_bias - 0.5) * 0.20   # ±0.10 max adjustment
-        adjusted_score = float(np.clip(adjusted_score + mkt_boost, 0, 1))
-
-        # Scale position size by market context multiplier
-        effective_capital = capital * psm
-
-        atr = max(sc["atr"], price * 0.005)
-        entry = round(price, 2)
-        sl = round(max(price - 1.5 * atr, price * 0.93), 2)
-        t1 = round(price + 2.0 * atr, 2)
-        t2 = round(price + 3.0 * atr, 2)
-        risk = entry - sl
-        rr = round((t1 - entry) / risk, 2) if risk > 0 else 0
-        qty = max(1, int(effective_capital // price))
-        clean = sym.replace(".NS", "")
+        # Step 6: Sector strength (per-sector geo score, not static 0.2)
         sector = SYMBOL_TO_SECTOR.get(clean, "Other")
+        _GEO_MAP = {
+            "🛡️ Defence": 0.85, "🏦 PSU Banks": 0.70, "🏗️ Infra/Rail": 0.80,
+            "⚡ Energy": 0.72, "💻 IT/Tech": 0.68, "💊 Pharma": 0.65,
+            "⚙️ Metals": 0.60, "🚗 Auto/EV": 0.63, "🛒 FMCG": 0.55,
+            "💰 Finance": 0.67, "🧪 Chemicals": 0.62, "🏠 Realty/Cement": 0.58,
+            "📡 Telecom": 0.60, "📈 Small/Mid Cap": 0.55,
+        }
+        geo_score = _GEO_MAP.get(sector, 0.55)
 
-        # Today's volume from validated tick (more accurate than 5m bar sum)
-        live_volume = tick.get("volume", 0) if tick else 0
-        vol_ratio = sc["vol_ratio"]
+        # Step 7: Volume confirmation (0-0.25 contribution)
+        vol_ratio = sc.get("vol_ratio", 1.0)
+        vol_contrib = float(np.clip((vol_ratio - 1.0) / 4.0, 0.0, 0.25))
+
+        # Step 8: VWAP position (proportional, not binary)
+        vwap_position = "at VWAP"
+        vwap_contrib = 0.0
+        if effective_vwap > 0:
+            vwap_pct = (price - effective_vwap) / effective_vwap
+            vwap_contrib = float(np.clip(vwap_pct * 8, -0.08, 0.08))
+            if vwap_pct > 0.002:
+                vwap_position = f"above VWAP +{vwap_pct*100:.2f}% ✅"
+            elif vwap_pct < -0.002:
+                vwap_position = f"below VWAP {vwap_pct*100:.2f}% ⚠️"
+
+        # Step 9: Composite confidence — weighted, per-stock, dynamic
+        # TA 40% | Volume 20% | Sector 15% | VWAP 15% | Macro 10%
+        mkt_contrib = (mkt_bias - 0.5) * 0.10
+        adjusted_score = float(np.clip(
+            0.40 * sc["score"]
+            + 0.20 * (0.5 + vol_contrib)
+            + 0.15 * geo_score
+            + 0.15 * (0.5 + vwap_contrib)
+            + 0.10 * (0.5 + mkt_contrib),
+            0, 1
+        ))
+
+        # Step 10: Position sizing with real ATR
+        effective_capital = capital * psm
+        entry = round(price, 2)
+        sl    = round(max(price - 1.5 * atr, price * 0.93), 2)
+        t1    = round(price + 2.0 * atr, 2)
+        t2    = round(price + 3.0 * atr, 2)
+        risk  = entry - sl
+        rr    = round((t1 - entry) / risk, 2) if risk > 0 else 0
+        qty   = max(1, int(effective_capital // price))
 
         report = StockMetadata.generate_report(
             symbol=clean, price=price, sector=sector,
             confidence=adjusted_score,
             direction="UP" if adjusted_score >= 0.55 else "NEUTRAL",
-            predicted_return=0, volatility=0.2, rsi=sc["rsi"],
+            predicted_return=0, volatility=_vol_real, rsi=sc["rsi"],
             entry=entry, target=t1, stop_loss=sl, mode="intraday",
         )
 
-        # Data quality badge
-        quality = "✅ Live" if data_source in ("merged", "fast_info") else ("⚡ 1m" if data_source == "1m_bars" else "⚠️ Cached")
+        # Step 11: Structured reasoning (specific, not generic)
+        reasoning_parts = list(sc["reasons"])
+        reasoning_parts.append(f"Price {vwap_position}")
+        if vol_ratio > 2.0:
+            reasoning_parts.append(f"Volume surge {vol_ratio:.1f}x avg — strong momentum")
+        elif vol_ratio > 1.3:
+            reasoning_parts.append(f"Volume {vol_ratio:.1f}x avg — above average")
+        if geo_score >= 0.75:
+            reasoning_parts.append(f"Strong sector tailwind: {sector}")
+        elif geo_score <= 0.57:
+            reasoning_parts.append(f"Weak sector theme: {sector}")
+        if mkt_bias >= 0.62:
+            reasoning_parts.append("Bullish macro — risk-on")
+        elif mkt_bias <= 0.40:
+            reasoning_parts.append("Bearish macro — reduce size")
+        reasoning_parts.append(f"ATR ₹{atr:.2f} | RR {rr}x | Sector score {geo_score:.0%}")
+
+        quality = ("✅ Live" if data_source in (DataSource.KITE, DataSource.UPSTOX)
+                   else "⚡ Yahoo" if data_source == DataSource.YAHOO else "⚠️ Cached")
 
         return {
             "symbol": clean, "yf_symbol": sym, "sector": sector,
             "price": entry, "qty": qty, "invested": round(qty * price, 2),
             "target_1": t1, "target_2": t2, "stop_loss": sl,
-            "confidence": adjusted_score, "risk_reward": rr,
+            "confidence": round(adjusted_score, 4), "risk_reward": rr,
             "profit": round(qty * (t1 - entry), 2),
             "loss": round(qty * (entry - sl), 2),
             "rsi": sc["rsi"], "vwap": effective_vwap,
             "vol_ratio": vol_ratio, "supertrend": sc["supertrend"],
-            "reasons": sc["reasons"],
+            "atr_raw": atr,
+            "reasons": reasoning_parts,
+            "reasoning": " | ".join(reasoning_parts[:4]),
             "signal": "BUY" if adjusted_score >= min_conf else "WATCH",
             "is_penny": price <= PENNY_MAX_PRICE,
             "risk_level": report["risk_level"],
             "holding": report["holding_duration"],
             "data_quality": quality,
             "data_source": data_source,
+            "bid": bid, "ask": ask,
             "df": df,
         }
     except Exception:
@@ -456,8 +527,9 @@ def _scan_one(args):
 
 
 def run_scan(universe, capital, max_price, min_conf, penny_only=False):
-    # Clear stale live tick cache before each scan
-    clear_live_cache()
+    # Clear ALL caches before each scan so prices and bars are always fresh
+    clear_tick_cache()
+    DataService.clear_intraday_cache()
 
     # Fetch market context once — shared across all workers
     try:
@@ -557,7 +629,13 @@ with st.sidebar:
         refresh_sec = 300
 
     st.markdown("---")
-    st.markdown(f'<div style="color:#1e3a5f;font-size:0.68rem;">Universe: <b style="color:#3b82f6;">{len(INTRADAY_STOCKS)}</b> stocks | 14 sectors</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="color:#1e3a5f;font-size:0.68rem;">Universe: <b style="color:#3b82f6;">{len(ALL_SYMBOLS_CLEAN)}</b> stocks | {len(SECTOR_UNIVERSE)} sectors</div>', unsafe_allow_html=True)
+    # Data source status badge
+    _src_status = _data_router.source_status()
+    _src_label = _src_status["primary_source"].upper()
+    _src_color = "#10b981" if _src_status["is_realtime"] else "#f59e0b"
+    _src_badge = "🟢 LIVE" if _src_status["is_realtime"] else "🟡 DELAYED"
+    st.markdown(f'<div style="color:{_src_color};font-size:0.68rem;margin-top:2px;">Data: {_src_badge} · {_src_label}</div>', unsafe_allow_html=True)
     st.caption("Not financial advice. Paper trade first.")
 
 # ── TOP HEADER ────────────────────────────────────────────────────────────────
@@ -693,6 +771,7 @@ if scan_btn or best_btn:
     st.session_state["scan_date"] = scan_date.strftime("%d %b %Y")
     st.session_state["mkt_label"] = mkt_label
     st.session_state["mkt_bias"] = mkt_bias
+    st.session_state["_last_scan_ts"] = _time.time()  # reset auto-refresh countdown
 
 # ── Re-filter buys live on every rerun (slider changes take effect immediately) ─
 if "trades" in st.session_state:
@@ -748,6 +827,45 @@ with tab1:
         buys = st.session_state.get("buys", [])
         all_t = st.session_state.get("trades", [])
         scan_time = st.session_state.get("scan_time", "")
+
+        # ── Live price refresh (no re-scan — just updates LTP in existing results) ──
+        _rp_col1, _rp_col2, _rp_col3 = st.columns([1, 1, 4])
+        with _rp_col1:
+            _refresh_prices_btn = st.button("🔄 Refresh Prices", key="refresh_prices_btn", use_container_width=True)
+        with _rp_col2:
+            _price_age = st.session_state.get("_price_refresh_time", scan_time)
+            st.markdown(f'<div style="padding-top:10px;color:#334155;font-size:0.72rem;">Prices as of: <b style="color:#3b82f6;">{_price_age}</b></div>', unsafe_allow_html=True)
+
+        if _refresh_prices_btn and all_t:
+            # Re-fetch live LTP for each trade and patch price/entry/targets in-place
+            DataService.clear_intraday_cache()
+            clear_live_cache()
+            _updated = 0
+            for t in all_t:
+                try:
+                    tick = get_validated_tick(t["yf_symbol"])
+                    if tick and tick.get("is_valid") and tick["price"] > 0:
+                        new_price = tick["price"]
+                        old_price = t["price"]
+                        if abs(new_price - old_price) / max(old_price, 1) > 0.0001:
+                            # Recalculate levels from new price
+                            atr = max(t.get("atr_raw", new_price * 0.01), new_price * 0.005)
+                            t["price"] = round(new_price, 2)
+                            t["target_1"] = round(new_price + 2.0 * atr, 2)
+                            t["target_2"] = round(new_price + 3.0 * atr, 2)
+                            t["stop_loss"] = round(max(new_price - 1.5 * atr, new_price * 0.93), 2)
+                            t["invested"] = round(t["qty"] * new_price, 2)
+                            t["data_quality"] = "✅ Live"
+                            _updated += 1
+                except Exception:
+                    pass
+            st.session_state["trades"] = all_t
+            st.session_state["_price_refresh_time"] = _now_ist().strftime("%I:%M:%S %p IST")
+            # Re-filter buys with updated prices
+            st.session_state["buys"] = [t for t in all_t if t["confidence"] >= min_conf]
+            buys = st.session_state["buys"]
+            if _updated:
+                st.success(f"✅ Updated prices for {_updated} stocks")
 
         # Stats row — always show even if buys is empty after filtering
         s1,s2,s3,s4,s5,s6 = st.columns(6)
@@ -905,9 +1023,38 @@ with tab1:
                     neg_html = "".join(f'<span class="factor-neg">⚠️ {f}</span>' for f in factors["negative"][:2])
                     st.markdown(pos_html + neg_html, unsafe_allow_html=True)
 
-    if auto_refresh and "buys" in st.session_state:
-        _time.sleep(refresh_sec)
-        st.rerun()
+    # ── Auto-refresh: non-blocking timestamp-based re-scan ───────────────────
+    if auto_refresh:
+        _last_scan_ts = st.session_state.get("_last_scan_ts", 0)
+        _now_ts = _time.time()
+        _elapsed = _now_ts - _last_scan_ts
+        _remaining = max(0, refresh_sec - int(_elapsed))
+
+        # Show countdown so user knows when next refresh fires
+        st.markdown(
+            f'<div style="color:#334155;font-size:0.72rem;margin-top:8px;">'
+            f'🔄 Auto-refresh in <b style="color:#3b82f6;">{_remaining}s</b> '
+            f'(every {refresh_sec//60}m) — re-runs full scan with fresh prices</div>',
+            unsafe_allow_html=True,
+        )
+
+        if _elapsed >= refresh_sec:
+            # Time to re-scan — clear caches and re-run
+            clear_live_cache()
+            DataService.clear_intraday_cache()
+            trades, mkt_label, mkt_bias = run_scan(universe, capital, max_price, min_conf, penny_only)
+            st.session_state["trades"] = trades
+            st.session_state["scan_time"] = _now_ist().strftime("%I:%M:%S %p IST")
+            st.session_state["scan_date"] = scan_date.strftime("%d %b %Y")
+            st.session_state["mkt_label"] = mkt_label
+            st.session_state["mkt_bias"] = mkt_bias
+            st.session_state["_last_scan_ts"] = _time.time()
+            st.rerun()
+        else:
+            # Not time yet — schedule a lightweight rerun after remaining seconds
+            # Use st.empty + fragment-style polling (no blocking sleep)
+            _time.sleep(min(5, _remaining))   # max 5s sleep so UI stays responsive
+            st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — PENNY STOCKS
@@ -1852,8 +1999,8 @@ with tab8:
 st.markdown("---")
 st.markdown(f"""
 <div style='display:flex;justify-content:space-between;align-items:center;color:#1e3a5f;font-size:0.68rem;padding:4px 0;flex-wrap:wrap;gap:8px;'>
-    <span>⚡ QuantSignal India v5.0 &nbsp;|&nbsp; {len(INTRADAY_STOCKS)} stocks &nbsp;|&nbsp; 14 sectors &nbsp;|&nbsp; 6 tabs</span>
-    <span>Data: Yahoo Finance (15-min delayed) &nbsp;|&nbsp; Not financial advice &nbsp;|&nbsp; Always use stop-loss</span>
+    <span>⚡ QuantSignal India v5.0 &nbsp;|&nbsp; {len(ALL_SYMBOLS_CLEAN)} stocks &nbsp;|&nbsp; {len(SECTOR_UNIVERSE)} sectors &nbsp;|&nbsp; 8 tabs</span>
+    <span>Data: Yahoo Finance (fallback) · Plug in Kite/Upstox for real-time &nbsp;|&nbsp; Not financial advice</span>
     <span>{_now_ist().strftime("%d %b %Y %I:%M %p")} IST</span>
 </div>""", unsafe_allow_html=True)
 
@@ -2063,12 +2210,14 @@ with tab7:
             r6.metric("Annual Vol", f"{rm.get('volatility_annual', 0)*100:.1f}%")
             r7.metric("Total Return", f"{rm.get('total_return', 0)*100:.1f}%")
 
-            stress = RiskEngine.stress_test(bundle.df_daily["Close"].pct_change().dropna())
-            if stress:
-                st.markdown("**Stress Test Scenarios**")
-                stress_df = pd.DataFrame(stress)
-                stress_df.columns = ["Scenario", "Shock", "Annualised Impact"]
-                st.dataframe(stress_df, use_container_width=True, hide_index=True)
+            try:
+                stress = RiskEngine.stress_test(bundle.df_daily["Close"].pct_change().dropna())
+                if stress:
+                    st.markdown("**Stress Test Scenarios**")
+                    stress_df = pd.DataFrame(stress)
+                    st.dataframe(stress_df, use_container_width=True, hide_index=True)
+            except Exception:
+                pass
         else:
             st.info("Risk metrics unavailable — insufficient data.")
 
