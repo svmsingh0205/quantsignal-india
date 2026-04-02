@@ -1089,60 +1089,157 @@ with tab2:
     <div class="penny-header">
         <div style='font-size:1.3rem;font-weight:900;color:#c4b5fd;'>🪙 Penny Stock Scanner</div>
         <div style='color:#7c3aed;font-size:0.82rem;margin-top:4px;'>
-            Stocks priced ≤ ₹50 • High risk, high reward • Always use strict stop-loss
+            Stocks priced ≤ ₹50 • 300+ NSE penny stocks • High risk, high reward • Always use strict stop-loss
         </div>
     </div>""", unsafe_allow_html=True)
 
-    col_p1, col_p2, col_p3 = st.columns([2, 1, 1])
-    with col_p1:
-        penny_max_price_filter = st.slider("Max Price (₹)", 5, 50, 50, 5)
-    with col_p2:
-        penny_min_conf = st.slider("Min Confidence", 0.30, 0.80, 0.40, 0.05, key="penny_conf")
-    with col_p3:
+    # ── Build full penny universe ─────────────────────────────────────────────
+    try:
+        from backend.engines.universe import _PENNY as _PENNY_LIST
+        _penny_universe_clean = list(dict.fromkeys(_PENNY_LIST))
+    except Exception:
+        _penny_universe_clean = [s.replace(".NS","") for s in INTRADAY_STOCKS
+                                  if any(p in s for p in [
+                                      "YESBANK","IDEA","SUZLON","RPOWER","JPPOWER","UCOBANK",
+                                      "MAHABANK","PSB","CENTRALBK","BANKINDIA","NHPC","SJVN",
+                                      "IRFC","RECLTD","PFC","NBCC","BHEL","NATIONALUM","HINDCOPPER",
+                                  ])]
+
+    _penny_universe_yf = [f"{s}.NS" for s in _penny_universe_clean]
+
+    # ── Controls row ──────────────────────────────────────────────────────────
+    pc1, pc2, pc3, pc4 = st.columns([2.5, 1.2, 1.2, 1.1])
+    with pc1:
+        # Search box — filters the displayed results list
+        penny_search = st.text_input(
+            "🔍 Search penny stocks",
+            placeholder="Type symbol e.g. YESBANK, SUZLON, RPOWER…",
+            key="penny_search_box",
+            label_visibility="collapsed",
+        ).strip().upper()
+    with pc2:
+        penny_max_price_filter = st.slider("Max Price (₹)", 5, 50, 50, 5, key="penny_max_p")
+    with pc3:
+        penny_min_conf = st.slider("Min Confidence", 0.25, 0.80, 0.35, 0.05, key="penny_conf")
+    with pc4:
         penny_scan_btn = st.button("🪙 Scan Penny Stocks", type="primary", use_container_width=True)
 
+    # ── Universe info strip ───────────────────────────────────────────────────
+    st.markdown(
+        f'<div style="color:#475569;font-size:0.72rem;margin-bottom:8px;">'
+        f'Universe: <b style="color:#c4b5fd;">{len(_penny_universe_clean)}</b> penny stocks tracked &nbsp;|&nbsp; '
+        f'Price ≤ ₹{penny_max_price_filter} &nbsp;|&nbsp; Min confidence {penny_min_conf:.0%}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Scan ──────────────────────────────────────────────────────────────────
     if penny_scan_btn:
-        penny_universe = get_universe([], [], True)
-        penny_trades, _, _ = run_scan(penny_universe, capital, penny_max_price_filter, penny_min_conf, penny_only=True)
+        with st.spinner(f"Scanning {len(_penny_universe_yf)} penny stocks…"):
+            penny_trades, _, _ = run_scan(
+                _penny_universe_yf, capital, penny_max_price_filter,
+                penny_min_conf, penny_only=True,
+            )
         st.session_state["penny_trades"] = penny_trades
-        st.session_state["penny_min_conf"] = penny_min_conf
+        st.session_state["penny_scan_done"] = True
 
-    # Re-filter penny trades live when slider changes
-    if "penny_trades" in st.session_state:
-        _cur_penny_conf = penny_min_conf
-        pt = [t for t in st.session_state["penny_trades"] if t["confidence"] >= _cur_penny_conf]
-        if not pt:
-            st.info("No penny stock signals found. Try lowering confidence or increasing max price.")
+    # ── Display ───────────────────────────────────────────────────────────────
+    if st.session_state.get("penny_scan_done") and "penny_trades" in st.session_state:
+        _all_pt = st.session_state["penny_trades"]
+
+        # Re-filter by current slider values
+        pt = [t for t in _all_pt
+              if t["confidence"] >= penny_min_conf
+              and t["price"] <= penny_max_price_filter]
+
+        # Apply search filter
+        if penny_search:
+            pt = [t for t in pt if penny_search in t["symbol"].upper()]
+
+        # Summary metrics
+        pm1, pm2, pm3, pm4, pm5 = st.columns(5)
+        pm1.metric("Scanned", len(_penny_universe_clean))
+        pm2.metric("Signals Found", len(pt))
+        pm3.metric("BUY Signals", len([t for t in pt if t["signal"] == "BUY"]))
+        if pt:
+            pm4.metric("Cheapest", f"₹{min(t['price'] for t in pt):,.2f}")
+            pm5.metric("Best Confidence", f"{max(t['confidence'] for t in pt):.0%}")
         else:
-            # Summary
-            pm1, pm2, pm3, pm4 = st.columns(4)
-            pm1.metric("Penny Stocks Found", len(pt))
-            pm2.metric("BUY Signals", len([t for t in pt if t["signal"]=="BUY"]))
-            if pt:
-                pm3.metric("Cheapest", f"₹{min(t['price'] for t in pt):,.2f}")
-                pm4.metric("Best Confidence", f"{max(t['confidence'] for t in pt):.0%}")
+            pm4.metric("Cheapest", "—")
+            pm5.metric("Best Confidence", "—")
 
-            st.markdown("---")
-            st.markdown("### 🪙 Penny Stock Detailed Report")
+        st.markdown("---")
 
-            for t in pt[:20]:
-                signal_color = "#10b981" if t["signal"]=="BUY" else "#f59e0b"
+        if not pt:
+            if penny_search:
+                st.warning(f"No results for **{penny_search}**. Try a different symbol or lower the confidence threshold.")
+            else:
+                st.info("No penny stock signals found. Try lowering confidence or increasing max price.")
+        else:
+            # ── Pagination ────────────────────────────────────────────────────
+            PAGE_SIZE = 25
+            total_pages = max(1, (len(pt) + PAGE_SIZE - 1) // PAGE_SIZE)
+            pg_col1, pg_col2, pg_col3 = st.columns([1, 2, 1])
+            with pg_col2:
+                page_num = st.number_input(
+                    f"Page (1–{total_pages})", min_value=1, max_value=total_pages,
+                    value=1, step=1, key="penny_page",
+                    label_visibility="collapsed",
+                )
+            page_start = (page_num - 1) * PAGE_SIZE
+            page_end   = page_start + PAGE_SIZE
+            pt_page    = pt[page_start:page_end]
+
+            st.markdown(
+                f'<div style="color:#475569;font-size:0.72rem;margin-bottom:8px;">'
+                f'Showing {page_start+1}–{min(page_end, len(pt))} of <b style="color:#c4b5fd;">{len(pt)}</b> results'
+                f'{"  ·  Search: <b style=color:#f59e0b;>" + penny_search + "</b>" if penny_search else ""}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # ── Quick table view ──────────────────────────────────────────────
+            tbl_data = [{
+                "Symbol":     t["symbol"],
+                "Price ₹":    t["price"],
+                "Signal":     t["signal"],
+                "Conf %":     f"{t['confidence']:.0%}",
+                "Target ₹":   t["target_1"],
+                "SL ₹":       t["stop_loss"],
+                "R:R":        t["risk_reward"],
+                "RSI":        t["rsi"],
+                "Vol Ratio":  f"{t['vol_ratio']:.1f}x",
+                "Sector":     t["sector"],
+            } for t in pt_page]
+            st.dataframe(
+                pd.DataFrame(tbl_data),
+                use_container_width=True, hide_index=True,
+            )
+
+            st.markdown("### 🪙 Detailed Reports")
+
+            for t in pt_page:
+                signal_color = "#10b981" if t["signal"] == "BUY" else "#f59e0b"
                 factors = StockMetadata.get_global_factors(t["sector"])
                 with st.expander(
-                    f"🪙 {t['symbol']} — ₹{t['price']:,.2f} — {t['signal']} — Conf {t['confidence']:.0%} — {t['risk_level']}"
+                    f"🪙 {t['symbol']} — ₹{t['price']:,.2f} — "
+                    f"{t['signal']} — Conf {t['confidence']:.0%} — {t['risk_level']}"
                 ):
                     rc1, rc2, rc3, rc4, rc5 = st.columns(5)
                     rc1.metric("Price", f"₹{t['price']:,.2f}")
-                    rc2.metric("Target", f"₹{t['target_1']:,.2f}", f"+{((t['target_1']-t['price'])/t['price']*100):.1f}%")
-                    rc3.metric("Stop Loss", f"₹{t['stop_loss']:,.2f}", f"-{((t['price']-t['stop_loss'])/t['price']*100):.1f}%", delta_color="inverse")
+                    rc2.metric("Target", f"₹{t['target_1']:,.2f}",
+                               f"+{((t['target_1']-t['price'])/t['price']*100):.1f}%")
+                    rc3.metric("Stop Loss", f"₹{t['stop_loss']:,.2f}",
+                               f"-{((t['price']-t['stop_loss'])/t['price']*100):.1f}%",
+                               delta_color="inverse")
                     rc4.metric("R:R Ratio", f"{t['risk_reward']}x")
-                    rc5.metric("Qty (₹{:,.0f})".format(capital), t["qty"])
+                    rc5.metric(f"Qty (₹{capital:,.0f})", t["qty"])
 
                     st.markdown(f"""
                     <div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;'>
                         <div class="report-card">
                             <div style='font-size:0.72rem;color:#475569;font-weight:700;text-transform:uppercase;margin-bottom:8px;'>📊 Technical Signals</div>
-                            {''.join(f'<span class="reason-chip">{r}</span>' for r in t["reasons"])}
+                            {''.join(f'<span class="reason-chip">{r}</span>' for r in t["reasons"][:6])}
                             <div style='margin-top:8px;color:#64748b;font-size:0.75rem;'>
                                 RSI: <b style='color:#a78bfa;'>{t["rsi"]}</b> &nbsp;|&nbsp;
                                 VWAP: <b style='color:#f59e0b;'>₹{t["vwap"]}</b> &nbsp;|&nbsp;
@@ -1166,33 +1263,67 @@ with tab2:
                         <div style='margin-top:6px;'>{''.join(f'<span class="factor-neg">⚠️ {f}</span>' for f in factors["negative"][:2])}</div>
                     </div>
                     <div style='margin-top:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.2);border-radius:8px;padding:10px;font-size:0.75rem;color:#fca5a5;'>
-                        ⚠️ <b>Penny Stock Warning:</b> High volatility, low liquidity. Use strict stop-loss. Never invest more than 2-5% of capital in a single penny stock.
+                        ⚠️ <b>Penny Stock Warning:</b> High volatility, low liquidity. Use strict stop-loss. Never invest more than 2–5% of capital in a single penny stock.
                     </div>""", unsafe_allow_html=True)
 
                     if "df" in t and not t["df"].empty:
                         dc = t["df"].tail(60)
                         fm = go.Figure()
                         fm.add_trace(go.Candlestick(
-                            x=dc.index, open=dc["Open"], high=dc["High"], low=dc["Low"], close=dc["Close"],
-                            increasing=dict(line=dict(color="#10b981"),fillcolor="#10b981"),
-                            decreasing=dict(line=dict(color="#ef4444"),fillcolor="#ef4444"),
+                            x=dc.index, open=dc["Open"], high=dc["High"],
+                            low=dc["Low"], close=dc["Close"],
+                            increasing=dict(line=dict(color="#10b981"), fillcolor="#10b981"),
+                            decreasing=dict(line=dict(color="#ef4444"), fillcolor="#ef4444"),
                         ))
                         if "VWAP" in dc.columns:
-                            fm.add_trace(go.Scatter(x=dc.index, y=dc["VWAP"], mode="lines",
-                                line=dict(color="#f59e0b",width=1.2,dash="dot"), name="VWAP"))
+                            fm.add_trace(go.Scatter(
+                                x=dc.index, y=dc["VWAP"], mode="lines",
+                                line=dict(color="#f59e0b", width=1.2, dash="dot"), name="VWAP",
+                            ))
                         fm.add_hline(y=t["price"], line_color="#6366f1", annotation_text="Entry")
                         fm.add_hline(y=t["target_1"], line_color="#10b981", line_dash="dash", annotation_text="T1")
                         fm.add_hline(y=t["stop_loss"], line_color="#ef4444", line_dash="dash", annotation_text="SL")
                         fm.update_layout(**_chart_layout(height=280))
                         fm.update_layout(xaxis_rangeslider_visible=False, showlegend=True)
                         st.plotly_chart(fm, use_container_width=True)
-    else:
+
+            # Pagination footer
+            if total_pages > 1:
+                st.markdown(
+                    f'<div style="text-align:center;color:#475569;font-size:0.72rem;margin-top:12px;">'
+                    f'Page {page_num} of {total_pages} &nbsp;·&nbsp; '
+                    f'Use the page input above to navigate'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    elif not st.session_state.get("penny_scan_done"):
+        # Welcome state — show the full browsable list before scanning
         st.markdown("""
-        <div style='text-align:center;padding:50px;background:#0a1628;border:1px solid #0f2040;border-radius:16px;'>
+        <div style='text-align:center;padding:30px 20px 20px;background:#0a1628;border:1px solid #0f2040;border-radius:16px;margin-bottom:16px;'>
             <div style='font-size:2.5rem;'>🪙</div>
-            <div style='font-size:1.1rem;color:#94a3b8;margin-top:10px;'>Click "Scan Penny Stocks" to find high-potential low-price stocks</div>
-            <div style='color:#334155;margin-top:6px;font-size:0.82rem;'>Stocks priced ≤ ₹50 with strong technical signals</div>
+            <div style='font-size:1.1rem;color:#94a3b8;margin-top:10px;'>Click <b style="color:#c4b5fd;">Scan Penny Stocks</b> to find live signals</div>
+            <div style='color:#334155;margin-top:6px;font-size:0.82rem;'>Scans all penny stocks in real-time using VWAP, RSI, Volume, Supertrend</div>
         </div>""", unsafe_allow_html=True)
+
+        # Show the full browsable penny universe even before scanning
+        st.markdown(f"### 📋 Full Penny Stock Universe ({len(_penny_universe_clean)} stocks)")
+        st.markdown('<div style="color:#475569;font-size:0.75rem;margin-bottom:8px;">Browse all tracked penny stocks. Click Scan to get live signals.</div>', unsafe_allow_html=True)
+
+        # Filter by search even in browse mode
+        _browse_list = _penny_universe_clean
+        if penny_search:
+            _browse_list = [s for s in _browse_list if penny_search in s.upper()]
+            st.markdown(f'<div style="color:#f59e0b;font-size:0.72rem;">Search: <b>{penny_search}</b> — {len(_browse_list)} matches</div>', unsafe_allow_html=True)
+
+        # Display as a grid of chips
+        _chips_html = "".join(
+            f'<span style="display:inline-block;background:rgba(124,58,237,0.12);color:#c4b5fd;'
+            f'padding:3px 10px;border-radius:6px;margin:2px;font-size:0.72rem;'
+            f'border:1px solid rgba(124,58,237,0.25);">{s}</span>'
+            for s in _browse_list
+        )
+        st.markdown(f'<div style="line-height:2;">{_chips_html}</div>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — NEXT-DAY PREDICTIONS
