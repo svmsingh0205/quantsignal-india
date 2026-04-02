@@ -26,8 +26,27 @@ from backend.engines.prediction_engine import PredictionEngine
 from backend.engines.stock_metadata import StockMetadata, GLOBAL_FACTORS, PENNY_MAX_PRICE
 from backend.engines.risk_engine import RiskEngine
 from backend.intraday_config import INTRADAY_STOCKS, SECTOR_GROUPS
-from backend.engines.universe import MASTER_UNIVERSE, SECTOR_UNIVERSE, UniverseEngine, PennyStockEngine
-from backend.engines.market_data_router import router as _data_router
+
+# New universe — graceful fallback if import fails
+try:
+    from backend.engines.universe import MASTER_UNIVERSE, SECTOR_UNIVERSE, UniverseEngine, PennyStockEngine
+except Exception:
+    MASTER_UNIVERSE = []
+    SECTOR_UNIVERSE = SECTOR_GROUPS
+    UniverseEngine = None
+    PennyStockEngine = None
+
+# Market data router — lazy, only used for status badge
+_data_router = None
+def _get_router():
+    global _data_router
+    if _data_router is None:
+        try:
+            from backend.engines.market_data_router import router
+            _data_router = router
+        except Exception:
+            _data_router = None
+    return _data_router
 
 st.set_page_config(
     page_title="QuantSignal India",
@@ -629,9 +648,8 @@ with st.sidebar:
         refresh_sec = 300
 
     st.markdown("---")
-    st.markdown(f'<div style="color:#1e3a5f;font-size:0.68rem;">Universe: <b style="color:#3b82f6;">{len(ALL_SYMBOLS_CLEAN)}</b> stocks | {len(SECTOR_UNIVERSE)} sectors</div>', unsafe_allow_html=True)
-    # Data source status badge
-    _src_status = _data_router.source_status()
+    st.markdown(f'<div style="color:#1e3a5f;font-size:0.68rem;">Universe: <b style="color:#3b82f6;">{len(ALL_SYMBOLS_CLEAN)}</b> stocks | {len(SECTOR_UNIVERSE)} sectors</div>', unsafe_allow_html=True)    # Data source status badge
+    _src_status = _get_router().source_status() if _get_router() else {"primary_source": "yahoo", "is_realtime": False}
     _src_label = _src_status["primary_source"].upper()
     _src_color = "#10b981" if _src_status["is_realtime"] else "#f59e0b"
     _src_badge = "🟢 LIVE" if _src_status["is_realtime"] else "🟡 DELAYED"
@@ -1999,8 +2017,7 @@ with tab8:
 st.markdown("---")
 st.markdown(f"""
 <div style='display:flex;justify-content:space-between;align-items:center;color:#1e3a5f;font-size:0.68rem;padding:4px 0;flex-wrap:wrap;gap:8px;'>
-    <span>⚡ QuantSignal India v5.0 &nbsp;|&nbsp; {len(ALL_SYMBOLS_CLEAN)} stocks &nbsp;|&nbsp; {len(SECTOR_UNIVERSE)} sectors &nbsp;|&nbsp; 8 tabs</span>
-    <span>Data: Yahoo Finance (fallback) · Plug in Kite/Upstox for real-time &nbsp;|&nbsp; Not financial advice</span>
+    <span>⚡ QuantSignal India v5.0 &nbsp;|&nbsp; {len(ALL_SYMBOLS_CLEAN)} stocks &nbsp;|&nbsp; {len(SECTOR_UNIVERSE)} sectors &nbsp;|&nbsp; 8 tabs</span>    <span>Data: Yahoo Finance (fallback) · Plug in Kite/Upstox for real-time &nbsp;|&nbsp; Not financial advice</span>
     <span>{_now_ist().strftime("%d %b %Y %I:%M %p")} IST</span>
 </div>""", unsafe_allow_html=True)
 
