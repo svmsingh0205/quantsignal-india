@@ -63,12 +63,10 @@ class DataService:
             return pd.DataFrame()
 
     @classmethod
-    def fetch_live_price(cls, symbol: str) -> dict | None:
+    def fetch_live_price(cls, symbol: str) -> Optional[dict]:
         """
-        Returns the latest real-time price for a symbol.
-        Uses yfinance fast_info (no cache delay) — refreshes every 60 s.
-        Falls back to 1-minute bar if fast_info fails.
-        Returns dict: {price, prev_close, change_pct, volume, high, low, name}
+        Returns validated live price dict, or None if data is unavailable.
+        STRICT: never returns a dict with price=0.
         """
         cache_key = f"live_{symbol}"
         if cache_key in cls._price_cache:
@@ -80,7 +78,6 @@ class DataService:
             ticker = yf.Ticker(symbol)
             fi = ticker.fast_info
 
-            # yfinance fast_info uses attribute access, not dict keys
             try:
                 price = float(getattr(fi, "last_price", None) or 0)
                 prev  = float(getattr(fi, "previous_close", None) or 0)
@@ -88,28 +85,35 @@ class DataService:
                 price, prev = 0, 0
 
             # fast_info failed — fall back to 1m bar
-            if price == 0:
-                df1m = ticker.history(period="1d", interval="1m")
+            if price <= 0:
+                df1m = ticker.history(period="1d", interval="1m",
+                                      auto_adjust=True, actions=False)
                 if df1m.empty:
+                    logger.warning("fetch_live_price: no 1m data for %s", symbol)
                     return None
                 df1m = cls._clean(df1m)
-                if df1m.empty:
+                if df1m.empty or float(df1m["Close"].iloc[-1]) <= 0:
+                    logger.warning("fetch_live_price: zero price after 1m fallback for %s", symbol)
                     return None
                 price = float(df1m["Close"].iloc[-1])
                 prev  = float(df1m["Close"].iloc[0]) if len(df1m) > 1 else price
 
+            # Final price guard
+            if price <= 0:
+                logger.warning("fetch_live_price: price=0 for %s — rejecting", symbol)
+                return None
+
             chg_pct = round((price / prev - 1) * 100, 2) if prev > 0 else 0.0
 
-            # 5-day daily for high/low context
             df5d = cls.fetch_ohlcv(symbol, period="5d", interval="1d")
-            high_52 = float(df5d["High"].max()) if not df5d.empty else price
-            low_52  = float(df5d["Low"].min())  if not df5d.empty else price
+            high_5d = float(df5d["High"].max()) if not df5d.empty else price
+            low_5d  = float(df5d["Low"].min())  if not df5d.empty else price
             vol     = int(getattr(fi, "three_month_average_volume", None) or
                           (int(df5d["Volume"].iloc[-1]) if not df5d.empty else 0))
 
-            # Today's intraday high/low from 1m bars
             try:
-                df_today = ticker.history(period="1d", interval="1m")
+                df_today = ticker.history(period="1d", interval="1m",
+                                          auto_adjust=True, actions=False)
                 today_high = float(df_today["High"].max()) if not df_today.empty else price
                 today_low  = float(df_today["Low"].min())  if not df_today.empty else price
                 today_vol  = int(df_today["Volume"].sum())  if not df_today.empty else vol
@@ -117,21 +121,21 @@ class DataService:
                 today_high, today_low, today_vol = price, price, vol
 
             data = {
-                "symbol":    symbol.replace(".NS", "").replace(".BO", ""),
-                "price":     round(price, 2),
+                "symbol":     symbol.replace(".NS", "").replace(".BO", ""),
+                "price":      round(price, 2),
                 "prev_close": round(prev, 2),
-                "chg":       chg_pct,
-                "high_5d":   round(high_52, 2),
-                "low_5d":    round(low_52, 2),
+                "chg":        chg_pct,
+                "high_5d":    round(high_5d, 2),
+                "low_5d":     round(low_5d, 2),
                 "today_high": round(today_high, 2),
                 "today_low":  round(today_low, 2),
-                "volume":    today_vol,
-                "df":        df5d,
+                "volume":     today_vol,
+                "df":         df5d,
             }
             cls._price_cache[cache_key] = (_now_utc(), data)
             return data
         except Exception as e:
-            logger.error(f"fetch_live_price {symbol}: {e}")
+            logger.error("fetch_live_price %s: %s", symbol, e)
             return None
 
     @classmethod

@@ -218,12 +218,14 @@ def load_analysis_bundle(symbol: str, capital: float, risk_pct: float) -> Analys
         df_weekly = f_weekly.result()
 
     if df_daily.empty or len(df_daily) < 60:
-        raise ValueError(f"Insufficient daily data for {symbol}")
+        raise ValueError(f"Insufficient daily data for {symbol} — symbol may be invalid or delisted")
 
     df_intra = IntradayEngine.add_indicators(df_intra) if not df_intra.empty else df_intra
     df_features = FeatureEngine.compute_all_features(df_daily)
 
     price = float(df_daily["Close"].iloc[-1])
+    if price <= 0:
+        raise ValueError(f"Invalid price (₹{price}) for {symbol} — data may be corrupted")
     prev_price = float(df_daily["Close"].iloc[-2]) if len(df_daily) >= 2 else price
     price_change_1d = round((price / prev_price - 1) * 100, 2)
     price_change_1d_abs = round(price - prev_price, 2)

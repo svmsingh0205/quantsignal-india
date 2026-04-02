@@ -284,14 +284,17 @@ def get_universe(sector_filter: list, stock_filter: list, penny_only: bool) -> l
     return syms
 
 def _quick_search(symbol: str) -> dict | None:
-    """Fetch a real-time price snapshot for any NSE/BSE symbol."""
-    # Try NSE first, then BSE
+    """
+    Fetch a real-time price snapshot for any NSE/BSE symbol.
+    Returns None (never a fake dict) if data is unavailable or price is zero.
+    """
     for suffix in (".NS", ".BO"):
         yf_sym = symbol if symbol.endswith((".NS", ".BO")) else f"{symbol}{suffix}"
         data = DataService.fetch_live_price(yf_sym)
-        if data:
+        if data and data.get("price", 0) > 0:
             data["sector"] = SYMBOL_TO_SECTOR.get(symbol, "Other")
             return data
+    logger.warning("_quick_search: no valid data for %s", symbol)
     return None
 
 def _render_indicator_grid(indicators: list) -> None:
@@ -420,6 +423,10 @@ def _scan_one(args):
             return None
         if penny_only and price > PENNY_MAX_PRICE:
             return None
+        # Hard reject: never generate a report with zero or invalid price
+        if price <= 0:
+            logger.warning("_scan_one: price=0 for %s — skipping", sym)
+            return None
 
         # ── Step 4: TA scoring ────────────────────────────────────────────────
         df = engine.add_indicators(df)
@@ -443,7 +450,6 @@ def _scan_one(args):
         else:
             atr = max(sc["atr"], price * 0.005)
             _vol_real = 0.20
-
         # Step 6: Sector strength (per-sector geo score, not static 0.2)
         sector = SYMBOL_TO_SECTOR.get(clean, "Other")
         _GEO_MAP = {
@@ -717,7 +723,8 @@ if st.session_state.get("_search_result_sym"):
     _snap = st.session_state.get("_search_snap")
     _displayed_sym = st.session_state["_search_result_sym"]
     if not _snap:
-        st.error(f"❌ Could not find data for **{_displayed_sym}**. Check the symbol and try again.")
+        st.error(f"❌ Live data not available for **{_displayed_sym}**. The symbol may be invalid, delisted, or the market is closed. Please verify the symbol and try again.")
+        st.info("💡 Tip: Use the exact NSE symbol (e.g. RELIANCE, TATAMOTORS, HDFCBANK). Indices like NIFTY50 are not tradeable symbols.")
     else:
         _chg_color = "#10b981" if _snap["chg"] >= 0 else "#ef4444"
         _arrow = "▲" if _snap["chg"] >= 0 else "▼"
