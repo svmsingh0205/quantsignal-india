@@ -194,10 +194,33 @@ for _sec, _syms in SECTOR_GROUPS.items():
     for _s in _syms:
         SYMBOL_TO_SECTOR[_s.replace(".NS", "")] = _sec
 
-# Expanded universe: MASTER_UNIVERSE (1,500+) merged with INTRADAY_STOCKS
-_combined_universe = list(dict.fromkeys(
-    [s.replace(".NS", "") for s in INTRADAY_STOCKS] + MASTER_UNIVERSE
-))
+# ── BRD FIX: Dynamic full universe (Issue 1, 2, 3, 4) ────────────────────────
+# PRIMARY  : Live NSE + BSE API fetch (2,200 NSE + 600 SME + 5,000 BSE = 7,800+)
+# FALLBACK : Comprehensive curated list (2,000+ real NSE stocks)
+# NO hardcoded cap — full market coverage
+try:
+    from backend.engines.nse_fetcher import build_full_universe, get_sector_map as _get_sector_map
+    _universe_df = build_full_universe()
+    _combined_universe = _universe_df["symbol"].tolist()
+    # Merge with existing INTRADAY_STOCKS to ensure no regressions
+    _intraday_clean = [s.replace(".NS", "") for s in INTRADAY_STOCKS]
+    _combined_universe = list(dict.fromkeys(_intraday_clean + MASTER_UNIVERSE + _combined_universe))
+    # Override SECTOR_GROUPS with dynamic sector map
+    _dynamic_sector_map = _get_sector_map()
+    if _dynamic_sector_map:
+        # Convert yf_symbol format (RELIANCE.NS) to plain (RELIANCE.NS) — keep as-is
+        for _sec, _syms in _dynamic_sector_map.items():
+            if _sec not in SECTOR_GROUPS:
+                SECTOR_GROUPS[_sec] = _syms
+    import logging as _log
+    _log.getLogger(__name__).info(f"Dynamic universe loaded: {len(_combined_universe)} stocks")
+except Exception as _e:
+    import logging as _log
+    _log.getLogger(__name__).warning(f"Dynamic universe fetch failed, using legacy: {_e}")
+    _combined_universe = list(dict.fromkeys(
+        [s.replace(".NS", "") for s in INTRADAY_STOCKS] + MASTER_UNIVERSE
+    ))
+
 ALL_SYMBOLS_CLEAN = sorted(set(_combined_universe))
 
 # ── EXTENDED NSE/BSE SEARCH LIST (all liquid symbols) ─────────────────────────
@@ -264,6 +287,7 @@ def time_to_close() -> str:
     return f"{h}h {m}m left" if h else f"{m}m left"
 
 def get_universe(sector_filter: list, stock_filter: list, penny_only: bool) -> list[str]:
+    # BRD Fix Issue 3 + 4: Full dynamic universe, no artificial caps
     if stock_filter:
         return [f"{s}.NS" for s in stock_filter]
     if sector_filter:
@@ -272,15 +296,12 @@ def get_universe(sector_filter: list, stock_filter: list, penny_only: bool) -> l
             out.extend(SECTOR_GROUPS.get(s, []))
         syms = list(dict.fromkeys(out))
     else:
-        syms = INTRADAY_STOCKS[:]
+        # BRD Fix Issue 4: No Filter = FULL universe (not capped to 365)
+        syms = [f"{s}.NS" for s in _combined_universe]
     if penny_only:
-        # We'll filter by price during scan, but pre-filter known penny stocks
-        penny_known = [s for s in syms if any(p in s for p in [
-            "YESBANK","IDEA","SUZLON","RPOWER","JPPOWER","UCOBANK",
-            "MAHABANK","PSB","CENTRALBK","BANKINDIA","NHPC","SJVN",
-            "IRFC","RECLTD","PFC","NBCC","BHEL","NATIONALUM","HINDCOPPER",
-        ])]
-        return penny_known if penny_known else syms
+        # BRD Fix Issue 3: Scan ALL stocks, let _scan_one() filter price < Rs50
+        # Removed: broken 19-stock name-match hack
+        return syms
     return syms
 
 def _quick_search(symbol: str) -> dict | None:
@@ -807,7 +828,7 @@ if "trades" in st.session_state:
     st.session_state["pennies"] = [t for t in _all_trades if t["is_penny"] and t["confidence"] >= min_conf]
 
 # ── MAIN TABS ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab_backtest = st.tabs([
     "📡 Live Signals",
     "🪙 Penny Stocks",
     "🔮 Next-Day Picks",
@@ -816,6 +837,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📋 Reports",
     "🔍 Deep Dive",
     "📊 Market Context",
+    "🧪 Backtest",
 ])
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2564,3 +2586,110 @@ with tab7:
                 Technical Chart · ML Predictions · Risk Metrics · Monte Carlo · Multi-Analyzer · Trade Setup · Peer Comparison
             </div>
         </div>""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BRD FIX — Issue 5: BACKTEST TAB
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_backtest:
+    st.markdown("""
+    <div style='background:linear-gradient(135deg,#0a1628,#0f2040);border:1px solid #1e3a5f;
+    border-radius:14px;padding:20px;margin-bottom:16px;'>
+        <div style='font-size:1.4rem;font-weight:900;color:#f1f5f9;'>🧪 Backtest Engine</div>
+        <div style='color:#64748b;font-size:0.85rem;margin-top:4px;'>
+            Compare your signal predictions vs what actually happened — WIN / LOSS / HOLD
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    try:
+        from backend.engines.backtest_engine import run_batch_backtest
+        import pandas as pd
+
+        bt_col1, bt_col2 = st.columns([2, 1])
+        with bt_col1:
+            lookforward = st.slider("Lookforward window (trading days)", 5, 30, 10, 5,
+                                    key="bt_lookforward")
+        with bt_col2:
+            bt_mode = st.radio("Use signals from", ["Last scan", "Manual input"], key="bt_mode")
+
+        if bt_mode == "Last scan":
+            # Pull from last scan results stored in session state
+            scan_trades = st.session_state.get("scan_results") or st.session_state.get("all_trades", [])
+            if scan_trades:
+                predictions = [
+                    {
+                        "symbol":      t.get("symbol", ""),
+                        "entry_price": t.get("price", 0),
+                        "target":      t.get("target", 0),
+                        "stoploss":    t.get("stoploss", t.get("stop_loss", 0)),
+                    }
+                    for t in scan_trades
+                    if t.get("price", 0) > 0 and t.get("target", 0) > 0
+                ]
+                st.info(f"Loaded **{len(predictions)}** signals from last scan.")
+            else:
+                predictions = []
+                st.warning("No scan results found — run a scan first on the Live Signals tab, then return here.")
+
+        else:
+            st.caption("Enter comma-separated values. One row per stock.")
+            manual_input = st.text_area(
+                "symbol,entry_price,target,stoploss  (one per line)",
+                value="RELIANCE,2800,2950,2750\nINFY,1500,1580,1460\nYESBANK,20,23,18",
+                height=140,
+                key="bt_manual",
+            )
+            predictions = []
+            for line in manual_input.strip().split("\n"):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) == 4:
+                    try:
+                        predictions.append({
+                            "symbol":      parts[0],
+                            "entry_price": float(parts[1]),
+                            "target":      float(parts[2]),
+                            "stoploss":    float(parts[3]),
+                        })
+                    except ValueError:
+                        pass
+
+        if st.button("▶ Run Backtest", type="primary", use_container_width=True, key="bt_run"):
+            if not predictions:
+                st.error("No valid predictions to backtest. Add signals above.")
+            else:
+                with st.spinner(f"Backtesting {len(predictions)} stocks over {lookforward} trading days..."):
+                    report = run_batch_backtest(predictions, lookforward_days=lookforward)
+
+                if "error" in report and report["total"] == 0:
+                    st.error(f"Backtest failed: {report['error']}")
+                else:
+                    # ── Summary metrics ───────────────────────────────────────
+                    st.markdown("### Results")
+                    m1, m2, m3, m4, m5 = st.columns(5)
+                    m1.metric("Total",     report["total"])
+                    m2.metric("✅ Wins",   report["wins"])
+                    m3.metric("❌ Losses", report["losses"])
+                    m4.metric("⏸ Holds",  report["holds"])
+                    m5.metric("Win Rate",  f"{report['win_rate_pct']}%")
+
+                    r2c1, r2c2 = st.columns(2)
+                    r2c1.metric("Total PnL",   f"{report['total_pnl_pct']:+.2f}%")
+                    r2c2.metric("Avg PnL/trade", f"{report['avg_pnl_pct']:+.2f}%")
+
+                    # ── Detailed table ────────────────────────────────────────
+                    if report["results"]:
+                        df_bt = pd.DataFrame(report["results"])
+                        df_bt["outcome"] = df_bt["outcome"].map(
+                            {"WIN": "✅ WIN", "LOSS": "❌ LOSS", "HOLD": "⏸ HOLD"}
+                        )
+                        df_bt["pnl_pct"] = df_bt["pnl_pct"].apply(lambda x: f"{x:+.2f}%")
+                        st.dataframe(
+                            df_bt[["symbol","entry_price","target","stoploss",
+                                   "actual_high","actual_low","outcome","pnl_pct","days_checked"]],
+                            use_container_width=True,
+                        )
+                    st.session_state["last_backtest"] = report
+
+    except ImportError as e:
+        st.error(f"Backtest engine not found: {e}. Ensure backend/engines/backtest_engine.py exists.")
+    except Exception as e:
+        st.error(f"Backtest error: {e}")
